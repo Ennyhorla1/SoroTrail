@@ -141,7 +141,7 @@ func run() error {
 			return err
 		}
 	} else {
-		pool, err = pgxpool.New(ctx, cfg.DatabaseURL)
+		pool, err = store.NewPool(ctx, cfg.DatabaseURL, cfg.DBMaxConns, cfg.DBMinConns, cfg.DBMaxConnLifetime, cfg.DBMaxConnIdleTime)
 		if err != nil {
 			return fmt.Errorf("connecting to postgres: %w", err)
 		}
