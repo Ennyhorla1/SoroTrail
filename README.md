@@ -150,6 +150,7 @@ the struct tags in `internal/config/config.go` to prevent drift.
 | `RPC_BASE_BACKOFF` | duration | `500ms` | Initial retry backoff duration; doubles on each subsequent retry. |
 | `RPC_MAX_BACKOFF` | duration | `30s` | Upper bound on the computed retry backoff. |
 | `RPC_JITTER` | bool | `true` | Randomize each computed backoff to [0.5×, 1.5×) so concurrent retries don't thundering-herd the endpoint. Never applied to a provider's `Retry-After` hint. |
+| `RPC_HTTP_TIMEOUT` | duration | `30s` | Timeout on the underlying HTTP client's RPC requests. Raise for a slow private RPC endpoint. |
 
 ### Database
 
