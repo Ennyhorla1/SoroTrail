@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -68,6 +69,9 @@ type Config struct {
 	RPCRateLimit          float64       `env:"RPC_RATE_LIMIT" envDefault:"10"`
 	DatabaseURL           string        `env:"DATABASE_URL"`
 	PollInterval          time.Duration `env:"POLL_INTERVAL" envDefault:"5s"`
+	// HTTPAddr is the address the HTTP server listens on (host:port), e.g.
+	// ":8080" or "0.0.0.0:9090". See HTTP_ADDR in .env.example. It must be a
+	// valid host:port pair.
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
 	WatchedContracts      []string      `env:"WATCHED_CONTRACTS"`
 	StartLedger           uint32        `env:"START_LEDGER"`
@@ -443,6 +447,12 @@ func (c Config) Validate() error {
 	// indexer. Validate the shape only when someone actually set one.
 	if u, err := url.Parse(c.HorizonURL); c.HorizonURL != "" && (err != nil || u.Scheme == "" || u.Host == "") {
 		return fmt.Errorf("HORIZON_URL %q is not a valid URL", c.HorizonURL)
+	}
+
+	if c.HTTPAddr != "" {
+		if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
+			return fmt.Errorf("HTTP_ADDR %q is not a valid host:port (e.g. :8080)", c.HTTPAddr)
+		}
 	}
 
 	if c.PollInterval <= 0 {
