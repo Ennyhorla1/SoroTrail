@@ -168,6 +168,8 @@ type Config struct {
 	RateLimitRPS          float64 `env:"RATE_LIMIT_RPS"`
 	RateLimitBurst        int     `env:"RATE_LIMIT_BURST"`
 	RateLimitTrustedProxy bool    `env:"RATE_LIMIT_TRUSTED_PROXY" envDefault:"false"`
+	HourlyQuota           int64   `env:"HOURLY_QUOTA"`
+	DailyQuota            int64   `env:"DAILY_QUOTA"`
 
 	// CompressMinSize is the response body size, in bytes, at or above which
 	// responses are gzip/deflate encoded for clients that advertise support.
@@ -313,12 +315,15 @@ type Config struct {
 	// response headers. X-Request-ID is set on every response by the API's
 	// request logger (#29), so it is the default; an operator can extend
 	// the list or empty it to suppress the header entirely.
-	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID"`
+	CORSExposedHeaders []string `env:"CORS_EXPOSED_HEADERS" envDefault:"X-Request-ID,X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset"`
 }
 
 // Load reads configuration from the environment and validates it.
 // All validation failures are aggregated into a single error.
 func Load() (Config, error) {
+	if err := resolveFileEnv(); err != nil {
+		return Config{}, fmt.Errorf("resolving *_FILE environment values: %w", err)
+	}
 	var cfg Config
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing environment: %w", err)
@@ -349,6 +354,31 @@ func Load() (Config, error) {
 }
 
 // IsSQLite reports whether the database URL points to a SQLite database.
+func resolveFileEnv() error {
+	for _, kv := range os.Environ() {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name, filePath := parts[0], parts[1]
+		if !strings.HasSuffix(name, "_FILE") {
+			continue
+		}
+		baseName := strings.TrimSuffix(name, "_FILE")
+		if _, set := os.LookupEnv(baseName); set {
+			continue
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("%s: reading %q: %w", name, filePath, err)
+		}
+		if err := os.Setenv(baseName, strings.TrimRight(string(data), "\r\n")); err != nil {
+			return fmt.Errorf("%s: setting %s: %w", name, baseName, err)
+		}
+	}
+	return nil
+}
+
 func IsSQLite(databaseURL string) bool {
 	return strings.HasPrefix(databaseURL, "sqlite:")
 }
