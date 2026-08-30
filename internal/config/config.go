@@ -67,6 +67,12 @@ type Config struct {
 	// RPC_URLS is set (the failover path uses RPC_RATE_LIMIT_RPS).
 	RPCRateLimit          float64       `env:"RPC_RATE_LIMIT" envDefault:"10"`
 	DatabaseURL           string        `env:"DATABASE_URL"`
+	// DB pool sizing. Zero means "use the pgx default". These let an operator
+	// bound the Postgres connection pool without a code redeploy.
+	DBMaxConns        int32         `env:"DB_MAX_CONNS" envDefault:"0"`
+	DBMinConns        int32         `env:"DB_MIN_CONNS" envDefault:"0"`
+	DBMaxConnLifetime time.Duration `env:"DB_MAX_CONN_LIFETIME" envDefault:"0"`
+	DBMaxConnIdleTime time.Duration `env:"DB_MAX_CONN_IDLE_TIME" envDefault:"0"`
 	PollInterval          time.Duration `env:"POLL_INTERVAL" envDefault:"5s"`
 	HTTPAddr              string        `env:"HTTP_ADDR" envDefault:":8080"`
 	WatchedContracts      []string      `env:"WATCHED_CONTRACTS"`
@@ -437,6 +443,18 @@ func (c Config) Validate() error {
 		} else if path[0] != '/' && path[0] != '.' && path[0] != ':' {
 			return fmt.Errorf("sqlite DATABASE_URL %q must be an absolute or relative path (or :memory:)", c.DatabaseURL)
 		}
+	}
+	if c.DBMaxConns < 0 {
+		return fmt.Errorf("DB_MAX_CONNS must be non-negative, got %d", c.DBMaxConns)
+	}
+	if c.DBMinConns < 0 {
+		return fmt.Errorf("DB_MIN_CONNS must be non-negative, got %d", c.DBMinConns)
+	}
+	if c.DBMaxConnLifetime < 0 {
+		return fmt.Errorf("DB_MAX_CONN_LIFETIME must be non-negative, got %s", c.DBMaxConnLifetime)
+	}
+	if c.DBMaxConnIdleTime < 0 {
+		return fmt.Errorf("DB_MAX_CONN_IDLE_TIME must be non-negative, got %s", c.DBMaxConnIdleTime)
 	}
 	// Empty means "unused": HORIZON_URL is only read by `sorotrail backfill`
 	// and Load supplies a default, so an unset value is not a misconfigured

@@ -156,6 +156,10 @@ the struct tags in `internal/config/config.go` to prevent drift.
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
 | `DATABASE_URL` | string | — (required) | Postgres or SQLite connection string. Use `postgres://…` for production or `sqlite:./sorotrail.db` for a zero-dependency single-binary setup. |
+| `DB_MAX_CONNS` | int | `0` | Max connections in the Postgres pool. `0` (default) uses pgx's default. |
+| `DB_MIN_CONNS` | int | `0` | Min connections kept warm in the pool (`0` = pgx default). |
+| `DB_MAX_CONN_LIFETIME` | duration | `0` | Max lifetime of a DB connection (`0` = no limit, e.g. `30m`). |
+| `DB_MAX_CONN_IDLE_TIME` | duration | `0` | Max idle time of a DB connection (`0` = no limit, e.g. `5m`). |
 
 ### Ingestion
 
