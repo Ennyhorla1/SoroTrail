@@ -201,7 +201,11 @@ func run() error {
 	// the retry wrapper applies the configured backoff, honoring any
 	// Retry-After hint a rate-limiting provider sends (issue #58).
 	rpcClient := rpc.NewRetryClient(
-		rpc.NewHTTPClient(cfg.RPCURL, rpc.WithRateLimitRPS(cfg.RPCRateLimit)),
+		rpc.NewHTTPClient(
+			cfg.RPCURL,
+			rpc.WithRateLimitRPS(cfg.RPCRateLimit),
+			rpc.WithHTTPTimeout(cfg.RPCHTTPTimeout),
+		),
 		rpc.RetryConfig{
 			MaxAttempts: cfg.RPCMaxAttempts,
 			BaseBackoff: cfg.RPCBaseBackoff,

@@ -137,6 +137,10 @@ type Config struct {
 	RPCBaseBackoff time.Duration `env:"RPC_BASE_BACKOFF" envDefault:"500ms"`
 	RPCMaxBackoff  time.Duration `env:"RPC_MAX_BACKOFF" envDefault:"30s"`
 	RPCJitter      bool          `env:"RPC_JITTER" envDefault:"true"`
+	// RPCHTTPTimeout is the timeout on the underlying HTTP client's RPC
+	// requests (e.g. "30s"). Zero (default) keeps the client's 30s timeout;
+	// operators can raise it for a slow private RPC endpoint.
+	RPCHTTPTimeout time.Duration `env:"RPC_HTTP_TIMEOUT" envDefault:"30s"`
 
 	// Audit config. AUDIT_ENABLED=false (default) disables the auditor
 	// entirely; the binary behaves exactly like the pre-audit build.
@@ -534,6 +538,9 @@ func (c Config) Validate() error {
 	}
 	if c.RPCMaxBackoff <= 0 {
 		return fmt.Errorf("RPC_MAX_BACKOFF must be positive, got %s", c.RPCMaxBackoff)
+	}
+	if c.RPCHTTPTimeout < 0 {
+		return fmt.Errorf("RPC_HTTP_TIMEOUT must be non-negative, got %s", c.RPCHTTPTimeout)
 	}
 	if c.RateLimitRPS < 0 {
 		return fmt.Errorf("RATE_LIMIT_RPS must be non-negative")
