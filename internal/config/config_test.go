@@ -17,6 +17,7 @@ import (
 const validContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
 
 var envKeys = []string{
+	"HTTP_REQUEST_BODY_LIMIT", // body size limit
 	"RPC_URL", "RPC_URLS", "RPC_RATE_LIMIT_RPS", "RPC_RATE_LIMIT", "DATABASE_URL",
 	"POLL_INTERVAL", "HTTP_ADDR",
 	"WATCHED_CONTRACTS", "START_LEDGER", "RETENTION_LEDGERS", "INGEST_PAGE_SIZE", "INGEST_BATCH_SIZE", "LOG_LEVEL", "LOG_FORMAT",
@@ -69,6 +70,13 @@ func TestLoad(t *testing.T) {
 		check   func(t *testing.T, c Config)
 	}{
 		{
+			name: "HTTP_REQUEST_BODY_LIMIT env variable overrides default",
+			env:  map[string]string{"DATABASE_URL": "postgres://localhost/db", "HTTP_REQUEST_BODY_LIMIT": "8192"},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, int64(8192), c.HTTPRequestBodyLimit, "Request body limit from env")
+			},
+		},
+		{
 			name: "defaults with only DATABASE_URL",
 			env:  map[string]string{"DATABASE_URL": "postgres://localhost/db"},
 			check: func(t *testing.T, c Config) {
@@ -83,6 +91,7 @@ func TestLoad(t *testing.T) {
 					"LagWarnLedgers default lets the lag alarm work out of the box")
 				assert.Equal(t, 5*time.Second, c.StatsCacheTTL,
 					"StatsCacheTTL defaults to 5s")
+				assert.Equal(t, int64(1048576), c.HTTPRequestBodyLimit, "Request body limit default")
 			},
 		},
 		{
