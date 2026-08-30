@@ -68,6 +68,12 @@ type Config struct {
 	// RPC_URLS is set (the failover path uses RPC_RATE_LIMIT_RPS).
 	RPCRateLimit          float64       `env:"RPC_RATE_LIMIT" envDefault:"10"`
 	DatabaseURL           string        `env:"DATABASE_URL"`
+	// DB pool sizing. Zero means "use the pgx default". These let an operator
+	// bound the Postgres connection pool without a code redeploy.
+	DBMaxConns        int32         `env:"DB_MAX_CONNS" envDefault:"0"`
+	DBMinConns        int32         `env:"DB_MIN_CONNS" envDefault:"0"`
+	DBMaxConnLifetime time.Duration `env:"DB_MAX_CONN_LIFETIME" envDefault:"0"`
+	DBMaxConnIdleTime time.Duration `env:"DB_MAX_CONN_IDLE_TIME" envDefault:"0"`
 	PollInterval          time.Duration `env:"POLL_INTERVAL" envDefault:"5s"`
 	// HTTPAddr is the address the HTTP server listens on (host:port), e.g.
 	// ":8080" or "0.0.0.0:9090". See HTTP_ADDR in .env.example. It must be a
@@ -141,6 +147,10 @@ type Config struct {
 	RPCBaseBackoff time.Duration `env:"RPC_BASE_BACKOFF" envDefault:"500ms"`
 	RPCMaxBackoff  time.Duration `env:"RPC_MAX_BACKOFF" envDefault:"30s"`
 	RPCJitter      bool          `env:"RPC_JITTER" envDefault:"true"`
+	// RPCHTTPTimeout is the timeout on the underlying HTTP client's RPC
+	// requests (e.g. "30s"). Zero (default) keeps the client's 30s timeout;
+	// operators can raise it for a slow private RPC endpoint.
+	RPCHTTPTimeout time.Duration `env:"RPC_HTTP_TIMEOUT" envDefault:"30s"`
 
 	// Audit config. AUDIT_ENABLED=false (default) disables the auditor
 	// entirely; the binary behaves exactly like the pre-audit build.
@@ -161,6 +171,9 @@ type Config struct {
 	HTTPWriteTimeout      time.Duration `env:"HTTP_WRITE_TIMEOUT" envDefault:"30s"`
 	HTTPIdleTimeout       time.Duration `env:"HTTP_IDLE_TIMEOUT" envDefault:"60s"`
 	HTTPReadHeaderTimeout time.Duration `env:"HTTP_READ_HEADER_TIMEOUT" envDefault:"10s"`
+	// HTTPRequestBodyLimit caps the max size accepted for any request body (all endpoints).
+	// Default 1048576 (1 MiB) protects against memory/resource exhaustion. Set higher if needed when trusting clients.
+	HTTPRequestBodyLimit int64 `env:"HTTP_REQUEST_BODY_LIMIT" envDefault:"1048576"`
 
 	// APIKey, when set, gates the watched-contracts management endpoints
 	// via a constant-time comparison against the X-API-Key request header.
@@ -442,6 +455,18 @@ func (c Config) Validate() error {
 			return fmt.Errorf("sqlite DATABASE_URL %q must be an absolute or relative path (or :memory:)", c.DatabaseURL)
 		}
 	}
+	if c.DBMaxConns < 0 {
+		return fmt.Errorf("DB_MAX_CONNS must be non-negative, got %d", c.DBMaxConns)
+	}
+	if c.DBMinConns < 0 {
+		return fmt.Errorf("DB_MIN_CONNS must be non-negative, got %d", c.DBMinConns)
+	}
+	if c.DBMaxConnLifetime < 0 {
+		return fmt.Errorf("DB_MAX_CONN_LIFETIME must be non-negative, got %s", c.DBMaxConnLifetime)
+	}
+	if c.DBMaxConnIdleTime < 0 {
+		return fmt.Errorf("DB_MAX_CONN_IDLE_TIME must be non-negative, got %s", c.DBMaxConnIdleTime)
+	}
 	// Empty means "unused": HORIZON_URL is only read by `sorotrail backfill`
 	// and Load supplies a default, so an unset value is not a misconfigured
 	// indexer. Validate the shape only when someone actually set one.
@@ -542,6 +567,9 @@ func (c Config) Validate() error {
 	if c.RPCMaxBackoff <= 0 {
 		return fmt.Errorf("RPC_MAX_BACKOFF must be positive, got %s", c.RPCMaxBackoff)
 	}
+	if c.RPCHTTPTimeout < 0 {
+		return fmt.Errorf("RPC_HTTP_TIMEOUT must be non-negative, got %s", c.RPCHTTPTimeout)
+	}
 	if c.RateLimitRPS < 0 {
 		return fmt.Errorf("RATE_LIMIT_RPS must be non-negative")
 	}
@@ -559,6 +587,9 @@ func (c Config) Validate() error {
 	}
 	if c.HTTPReadHeaderTimeout < 0 {
 		return fmt.Errorf("HTTP_READ_HEADER_TIMEOUT must be non-negative, got %s", c.HTTPReadHeaderTimeout)
+	}
+	if c.HTTPRequestBodyLimit < 0 {
+		return fmt.Errorf("HTTP_REQUEST_BODY_LIMIT must be non-negative, got %d", c.HTTPRequestBodyLimit)
 	}
 	if c.APIMaxLimit < 1 {
 		return fmt.Errorf("API_MAX_LIMIT must be positive, got %d", c.APIMaxLimit)

@@ -141,7 +141,7 @@ func run() error {
 			return err
 		}
 	} else {
-		pool, err = pgxpool.New(ctx, cfg.DatabaseURL)
+		pool, err = store.NewPool(ctx, cfg.DatabaseURL, cfg.DBMaxConns, cfg.DBMinConns, cfg.DBMaxConnLifetime, cfg.DBMaxConnIdleTime)
 		if err != nil {
 			return fmt.Errorf("connecting to postgres: %w", err)
 		}
@@ -201,7 +201,11 @@ func run() error {
 	// the retry wrapper applies the configured backoff, honoring any
 	// Retry-After hint a rate-limiting provider sends (issue #58).
 	rpcClient := rpc.NewRetryClient(
-		rpc.NewHTTPClient(cfg.RPCURL, rpc.WithRateLimitRPS(cfg.RPCRateLimit)),
+		rpc.NewHTTPClient(
+			cfg.RPCURL,
+			rpc.WithRateLimitRPS(cfg.RPCRateLimit),
+			rpc.WithHTTPTimeout(cfg.RPCHTTPTimeout),
+		),
 		rpc.RetryConfig{
 			MaxAttempts: cfg.RPCMaxAttempts,
 			BaseBackoff: cfg.RPCBaseBackoff,
@@ -371,6 +375,7 @@ func run() error {
 	apiServer.SetRateLimiter(limiter)
 	apiServer.SetMetricsEnabled(cfg.MetricsEnabled)
 	apiServer.SetCompressMinSize(cfg.CompressMinSize)
+	apiServer.SetHTTPRequestBodyLimit(cfg.HTTPRequestBodyLimit)
 	apiServer.SetExportMaxRange(cfg.ExportMaxRange)
 	apiServer.SetCORSConfig(api.CORSConfig{
 		AllowedOrigins: cfg.CORSAllowedOrigins,

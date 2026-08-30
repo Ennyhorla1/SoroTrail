@@ -150,12 +150,17 @@ the struct tags in `internal/config/config.go` to prevent drift.
 | `RPC_BASE_BACKOFF` | duration | `500ms` | Initial retry backoff duration; doubles on each subsequent retry. |
 | `RPC_MAX_BACKOFF` | duration | `30s` | Upper bound on the computed retry backoff. |
 | `RPC_JITTER` | bool | `true` | Randomize each computed backoff to [0.5×, 1.5×) so concurrent retries don't thundering-herd the endpoint. Never applied to a provider's `Retry-After` hint. |
+| `RPC_HTTP_TIMEOUT` | duration | `30s` | Timeout on the underlying HTTP client's RPC requests. Raise for a slow private RPC endpoint. |
 
 ### Database
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
 | `DATABASE_URL` | string | — (required) | Postgres or SQLite connection string. Use `postgres://…` for production or `sqlite:./sorotrail.db` for a zero-dependency single-binary setup. |
+| `DB_MAX_CONNS` | int | `0` | Max connections in the Postgres pool. `0` (default) uses pgx's default. |
+| `DB_MIN_CONNS` | int | `0` | Min connections kept warm in the pool (`0` = pgx default). |
+| `DB_MAX_CONN_LIFETIME` | duration | `0` | Max lifetime of a DB connection (`0` = no limit, e.g. `30m`). |
+| `DB_MAX_CONN_IDLE_TIME` | duration | `0` | Max idle time of a DB connection (`0` = no limit, e.g. `5m`). |
 
 ### Ingestion
 
