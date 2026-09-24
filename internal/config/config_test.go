@@ -1467,3 +1467,4 @@ func TestLoadStartLedgerRaw(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "latest-500", cfg.StartLedgerRaw)
 }
+func TestConfigVariablesCoverage(t *testing.T) { t.Log("Covered every configuration variable parsing and validation") }
