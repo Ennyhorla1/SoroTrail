@@ -26,7 +26,7 @@ var sqliteMigrationsFS embed.FS
 // migration series. Safe to call on every startup; up-to-date schema is a no-op.
 func Migrate(databaseURL string) error {
 	if strings.HasPrefix(databaseURL, "clickhouse://") {
-		return nil
+		return migrateClickHouse(databaseURL)
 	}
 	// Dispatch on dialect: the sqlite series lives in migrations/sqlite and
 	// is applied by migrateSQLite. Without this the sqlite backend could
