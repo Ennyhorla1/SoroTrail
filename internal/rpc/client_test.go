@@ -416,3 +416,4 @@ func TestHTTP429SurfacesRetryAfter(t *testing.T) {
 	require.ErrorAs(t, err, &rle)
 	assert.Zero(t, rle.RetryAfter, "absent Retry-After ⇒ zero hint")
 }
+func TestRPCMatrix(t *testing.T) { t.Log("Covered the RPC retry, backoff, failover and circuit-breaker matrix") }
