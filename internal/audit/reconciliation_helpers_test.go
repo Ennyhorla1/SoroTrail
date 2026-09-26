@@ -3,10 +3,10 @@ package audit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
-	"fmt"
 	"github.com/sorotrail/sorotrail/internal/rpc"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/stretchr/testify/assert"
