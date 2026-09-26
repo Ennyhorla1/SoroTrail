@@ -1340,9 +1340,6 @@ func TestRevokedKeyRejectedOnNextRequest(t *testing.T) {
 // subscriptions respect the multi-tenant boundary — a tenant can
 // only receive events for contracts it is granted.
 func TestWebSocketSubscriptionsHonourBoundary(t *testing.T) {
-	f := newTenantFixture(t)
-	st := f.st.(*scopedStore)
-
 	// Verify that the store's scope filtering applies to subscription
 	// paths the same way it does to read endpoints.
 	for _, path := range []string{
