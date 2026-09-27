@@ -148,6 +148,16 @@ func RunStoreConformanceSuite(t *testing.T, st Store) {
 	})
 }
 
+// RunStoreConformanceSuite runs a standard set of error semantic and behavior
+// assertions against any Store implementation to guarantee that backends agree
+// on ErrNotFound, empty collections, and error handling.
+func RunStoreConformanceSuite(t *testing.T, st Store) {
+	runStoreTests(t, conformanceBackend{
+		name:    "custom",
+		factory: func(t *testing.T) Store { return st },
+	})
+}
+
 func runStoreTests(t *testing.T, backend conformanceBackend) {
 	t.Helper()
 
@@ -682,13 +692,4 @@ func TestClickHouse_SuiteSkipsCleanly(t *testing.T) {
 	if st == nil {
 		t.Skip("ClickHouse not available, skipping conformance suite")
 	}
-}
-// RunStoreConformanceSuite runs a standard set of error semantic and behavior
-// assertions against any Store implementation to guarantee that backends agree
-// on ErrNotFound, empty collections, and error handling.
-func RunStoreConformanceSuite(t *testing.T, st Store) {
-	runStoreTests(t, conformanceBackend{
-		name:    "custom",
-		factory: func(t *testing.T) Store { return st },
-	})
 }
