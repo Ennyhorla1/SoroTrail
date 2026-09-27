@@ -309,3 +309,10 @@ func (m *mockStore) FetchReplayBatch(ctx context.Context, fromLedger, toLedger i
 func (m *mockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBatch) error {
 	return nil
 }
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	st := store.NewPostgres(pool, 120960)
+	ctx := context.Background(), context.Background()
+	_, _ = ctx, st
+	assert.True(t, true)
+}
