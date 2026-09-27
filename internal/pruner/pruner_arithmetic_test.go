@@ -107,10 +107,10 @@ func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.Inge
 	if m.ingestionState != nil {
 		return *m.ingestionState, m.ingestionErr
 	}
-	return store.IngestionState{Network: "default", LastIngestedLedger: 2000, LatestLedgerTime: time.Now()}, m.ingestionErr
+	return store.IngestionState{Network: "default", LastIngestedLedger: 2000}, m.ingestionErr
 }
 
-func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger int64, t time.Time) (int64, error) {
+func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time) (int64, error) {
 	return int64(m.deleteCount), m.deleteErr
 }
 
