@@ -1,6 +1,3 @@
-// Package pruner runs an optional background job that deletes events older
-// than a configured age or below a configured ledger, with safe batching
-// so it never takes long locks or starves ingestion.
 package pruner
 
 import (
@@ -174,7 +171,9 @@ func (p *Pruner) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-} // pruneOnce performs one full sweep: deletes batches until fewer than
+}
+
+// pruneOnce performs one full sweep: deletes batches until fewer than
 // BatchSize rows are returned, then logs a summary. Returns the total
 // number of rows deleted in the sweep.
 //
