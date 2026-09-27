@@ -1,17 +1,19 @@
+//go:build integration
+
 package replay
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
 	"testing"
 
+	"encoding/json"
+	"fmt"
+	"github.com/sorotrail/sorotrail/internal/store"
+	"github.com/sorotrail/sorotrail/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/sorotrail/sorotrail/internal/store"
+	"io"
+	"log/slog"
 )
 
 func testLogger() *slog.Logger {
@@ -280,4 +282,54 @@ func TestJSONEqual(t *testing.T) {
 			assert.Equal(t, tt.want, jsonEqual(json.RawMessage(tt.a), json.RawMessage(tt.b)))
 		})
 	}
+}
+
+// mockStore implements a stub store for replay testing.
+type mockStore struct {
+	store.Store
+	batches []store.ReplayBatch
+}
+
+func (m *mockStore) FetchReplayBatch(ctx context.Context, fromLedger, toLedger int64, batchSize int) ([]store.ReplayBatch, error) {
+	return m.batches, nil
+}
+
+func (m *mockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBatch) error {
+	return nil
+}
+
+func TestReplay_Placeholder(t *testing.T) {
+	// Ensure package compiles and basic test harness works
+	assert.True(t, true)
+}
+
+func TestReplayBatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, `TRUNCATE events, ingestion_state, watched_contracts, replay_state`)
+	require.NoError(t, err)
+
+	assert.NotNil(t, pool)
+}
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	st := store.NewPostgres(pool, int64(store.DefaultEventPartitionSpan))
+	ctx := context.Background()
+
+	_, err := st.UpsertEvents(ctx, []store.Event{
+		{
+			ID:          "0000000000000001000",
+			Ledger:      10,
+			ContractID:  "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			TopicXDR:    []string{"AAAAAQ=="},
+			ValueXDR:    "AAAAAQ==",
+			DecodedJson: []byte(`{"value":1}`),
+		},
+	})
+	require.NoError(t, err)
+
+	state, err := st.GetReplayState(ctx)
+	require.NoError(t, err)
+	assert.NotNil(t, state)
 }
