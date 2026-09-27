@@ -31,6 +31,10 @@ func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (*store.Ing
 	return m.ingestionState, nil
 }
 
+func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger uint32, t time.Time) (int64, error) {
+	return m.deleteCount, m.deleteErr
+}
+
 func (m *mockArithmeticStore) LockPruner(ctx context.Context) (bool, error) {
 	m.lockCalled = true
 	return true, nil
@@ -39,10 +43,6 @@ func (m *mockArithmeticStore) LockPruner(ctx context.Context) (bool, error) {
 func (m *mockArithmeticStore) UnlockPruner(ctx context.Context) error {
 	m.unlockCalled = true
 	return nil
-}
-
-func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger uint32, t time.Time) (int64, error) {
-	return m.deleteCount, m.deleteErr
 }
 
 func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint32, t time.Time, limit int) (int64, error) {
@@ -76,7 +76,7 @@ func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 	}{
 		{
 			name: "age-based only",
-			Opts: Options{
+			opts: Options{
 				MaxAge: time.Hour * 24,
 			},
 			ingestionState: &store.IngestionState{
@@ -85,7 +85,7 @@ func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 		},
 		{
 			name: "ledger-floor only",
-			Opts: Options{
+			opts: Options{
 				RetainedLedgers: 50,
 			},
 			ingestionState: &store.IngestionState{
