@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -226,7 +227,6 @@ func TestEventsGoldenFilesAreValidJSON(t *testing.T) {
 		})
 	}
 }
-
 func TestEventsGoldenCoverage(t *testing.T) {
 	// The golden files must exist for each documented endpoint
 	// that produces a 200 response. This test asserts that the
