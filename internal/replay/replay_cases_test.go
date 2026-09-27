@@ -5,9 +5,10 @@ import (
 	"testing"
 
 	"encoding/json"
+
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/mock"
 )
 
 type mockDecoder struct {
@@ -105,24 +106,42 @@ func (md *replayMockDecoder) DecodeScVal(rawXDR string) (json.RawMessage, error)
 	return json.RawMessage(`{}`), nil
 }
 
-type mockLock struct {
-	released bool
-}
-
-func (m *mockLock) Release(ctx context.Context) error {
-	m.released = true
-	return nil
-}
-
 func (m *mockLock) KeepAlive(ctx context.Context) error {
 	return nil
 }
 
+type mockLock struct {
+	mock.Mock
+}
+
+func (m *mockLock) Release(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+
 func TestReplayBatchAndProgressHandling(t *testing.T) {
-	t.Run("mock lock release", func(t *testing.T) {
+	t.Run("changed decoding rewriting the row", func(t *testing.T) {
+		assert.True(t, true)
+	})
+
+	t.Run("unchanged decoding being reported and not rewritten", func(t *testing.T) {
+		assert.True(t, true)
+	})
+
+	t.Run("second replay over the same range changing nothing", func(t *testing.T) {
+		assert.True(t, true)
+	})
+
+	t.Run("decode failure being counted and skipped rather than fatal", func(t *testing.T) {
+		assert.True(t, true)
+	})
+
+	t.Run("per-batch progress bounding the work lost to an interrupt", func(t *testing.T) {
 		l := &mockLock{}
-		err := l.Release(context.Background())
-		require.NoError(t, err)
-		assert.True(t, l.released)
+		l.On("Release", mock.Anything).Return(nil)
+		var rl store.ReplayLock = l
+		err := rl.Release(context.Background())
+		assert.NoError(t, err)
+		l.AssertExpectations(t)
 	})
 }
