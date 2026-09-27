@@ -11,17 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time) (int64, error) {
-	return int64(m.deleteCount), m.deleteErr
-}
-
-func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint32, t time.Time, limit int) (int64, error) {
-	if m.deleteErr != nil {
-		return 0, m.deleteErr
-	}
-	return int64(m.deleteCount), nil
-}
-
 type Config struct {
 	Enabled         bool
 	MaxAge          time.Duration
