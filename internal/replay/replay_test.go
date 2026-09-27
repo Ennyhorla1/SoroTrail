@@ -2,15 +2,16 @@ package replay
 
 import (
 	"context"
-	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"io"
 	"log/slog"
 )
@@ -292,16 +293,6 @@ func TestReplay_Placeholder(t *testing.T) {
 	assert.True(t, true)
 }
 
-func TestReplayBatchAndProgressHandling(t *testing.T) {
-	pool := testdb.Setup(t, store.Migrate)
-	ctx := context.Background()
-
-	_, err := pool.Exec(ctx, `TRUNCATE events, ingestion_state, watched_contracts, replay_state`)
-	require.NoError(t, err)
-
-	assert.NotNil(t, pool)
-}
-
 type mockDecoder struct {
 	decodeFn func(raw []byte) ([]byte, error)
 }
@@ -416,4 +407,20 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		cancel()
 		assert.ErrorIs(t, ctx.Err(), context.Canceled)
 	})
+}
+func TestReplayBatchAndProgressHandling(t *testing.T) {
+	db := testdb.Setup(t, store.Migrate)
+	ctx := context.Background()
+
+	_, err := db.Exec(ctx, `
+		INSERT INTO events (id, ledger, event_id, contract_id, type, topic0, data_json, raw_xdr, created_at)
+		VALUES ('1-1', 100, 'e1', 'c1', 'contract', 't0', '{"v":1}', 'AAAA', NOW())
+	`)
+	require.NoError(t, err)
+
+	r, err := New(db, nil)
+	require.NoError(t, err)
+
+	err = r.Run(ctx, 100, 200, 10)
+	assert.NoError(t, err)
 }
