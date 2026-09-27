@@ -3,13 +3,15 @@ package pruner
 import (
 	"context"
 	"errors"
-	"github.com/sorotrail/sorotrail/internal/store"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sorotrail/sorotrail/internal/store"
 )
 
 func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
@@ -351,6 +353,7 @@ func TestPrunerDeletionArithmeticCoverage(t *testing.T) {
 		assert.Equal(t, int64(0), total)
 	})
 }
+
 func TestPrunerDeletionArithmetic_AgeAndLedgerBounds(t *testing.T) {
 	now := time.Now()
 	t.Run("ledger floor bound alone", func(t *testing.T) {
@@ -476,5 +479,34 @@ func TestPrunerDeletionArithmetic_ReportedCountsAndPartialFailure(t *testing.T) 
 		assert.Error(t, err)
 		assert.Equal(t, int64(0), total)
 		assert.Equal(t, 1, st.eventCount())
+	})
+}
+
+type mockPruneStore struct {
+	store.Store
+	deletedCount int64
+	pruned       bool
+}
+
+func (m *mockPruneStore) Prune(_ context.Context, _ int64, _ int64) (int64, error) {
+	m.pruned = true
+	return m.deletedCount, nil
+}
+
+func TestPrunerArithmetic_Cases(t *testing.T) {
+	t.Run("disabled pruner deletes nothing", func(t *testing.T) {
+		ms := &mockPruneStore{deletedCount: 100}
+		p := New(ms, Config{Enabled: false})
+		err := p.RunOnce(context.Background(), 1000)
+		require.NoError(t, err)
+		assert.False(t, ms.pruned)
+	})
+
+	t.Run("ledger floor and age bounds", func(t *testing.T) {
+		ms := &mockPruneStore{deletedCount: 50}
+		p := New(ms, Config{Enabled: true, MaxLedgerAge: 100, MinRetainedLedger: 500})
+		err := p.RunOnce(context.Background(), 1000)
+		require.NoError(t, err)
+		assert.True(t, ms.pruned)
 	})
 }
