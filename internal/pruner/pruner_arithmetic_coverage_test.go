@@ -59,9 +59,8 @@ func TestPrunerArithmeticCoverage_Disabled(t *testing.T) {
 	}
 
 	p := New(st, slog.Default(), Options{
-		Enabled: false,
+		MaxAge: time.Hour,
 	})
-
 	err := p.Run(ctx)
 	require.NoError(t, err)
 	assert.False(t, st.lockCalled)
@@ -69,7 +68,6 @@ func TestPrunerArithmeticCoverage_Disabled(t *testing.T) {
 
 func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 	ctx := context.Background()
-	now := time.Now()
 
 	tests := []struct {
 		name           string
@@ -78,9 +76,8 @@ func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 	}{
 		{
 			name: "age-based only",
-			opts: Options{
-				Enabled: true,
-				MaxAge:  time.Hour * 24,
+			Opts: Options{
+				MaxAge: time.Hour * 24,
 			},
 			ingestionState: &store.IngestionState{
 				LastIngestedLedger: 100,
@@ -88,9 +85,8 @@ func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 		},
 		{
 			name: "ledger-floor only",
-			opts: Options{
-				Enabled:   true,
-				MinLedger: 50,
+			Opts: Options{
+				RetainedLedgers: 50,
 			},
 			ingestionState: &store.IngestionState{
 				LastIngestedLedger: 100,
@@ -121,9 +117,8 @@ func TestPrunerArithmeticCoverage_BatchingAndCounts(t *testing.T) {
 	}
 
 	p := New(st, slog.Default(), Options{
-		Enabled:   true,
-		BatchSize: 10,
-		MinLedger: 100,
+		BatchSize:       10,
+		RetainedLedgers: 100,
 	})
 
 	err := p.Run(ctx)
@@ -138,10 +133,8 @@ func TestPrunerArithmeticCoverage_PartialFailure(t *testing.T) {
 	}
 
 	p := New(st, slog.Default(), Options{
-		Enabled:   true,
-		MinLedger: 100,
+		RetainedLedgers: 100,
 	})
-
 	err := p.Run(ctx)
 	assert.Error(t, err)
 	assert.True(t, st.unlockCalled)
