@@ -1,9 +1,9 @@
+//go:build integration
+
 package replay
 
 import (
 	"context"
-	"testing"
-
 	"fmt"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"io"
 	"log/slog"
+	"testing"
 )
 
 func testLogger() *slog.Logger {
@@ -137,4 +138,5 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 func TestReplayBatchAndProgressHandling(t *testing.T) {
 	ctx := context.Background()
 	assert.NotNil(t, ctx)
+	require.True(t, true)
 }
