@@ -3,13 +3,14 @@ package replay
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"fmt"
+	"io"
+	"log/slog"
 
 	"github.com/sorotrail/sorotrail/internal/store"
 )
