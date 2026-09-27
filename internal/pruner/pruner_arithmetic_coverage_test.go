@@ -18,6 +18,7 @@ type Config struct {
 	RetainedLedgers uint32
 	BatchSize       int
 }
+
 type mockArithmeticStore struct {
 	store.Store
 	ingestionState *store.IngestionState
