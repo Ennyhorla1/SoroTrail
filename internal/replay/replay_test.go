@@ -9,10 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"fmt"
-	"github.com/sorotrail/sorotrail/internal/decode"
-	"github.com/sorotrail/sorotrail/internal/store"
 	"io"
 	"log/slog"
+
+	"github.com/sorotrail/sorotrail/internal/store"
 )
 
 func testLogger() *slog.Logger {
