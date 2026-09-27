@@ -1,12 +1,15 @@
 package pruner
 
-import "context"
-import "log/slog"
-import "testing"
-import "time"
-import "github.com/stretchr/testify/assert"
-import "github.com/stretchr/testify/require"
-import "github.com/sorotrail/sorotrail/internal/store"
+import (
+	"context"
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/sorotrail/sorotrail/internal/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 type Config struct {
 	Enabled         bool
@@ -48,7 +51,6 @@ func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint
 	}
 	return m.deleteCount, nil
 }
-
 func TestPrunerArithmeticCoverage_Disabled(t *testing.T) {
 	ctx := context.Background()
 	st := &mockArithmeticStore{
@@ -83,7 +85,7 @@ func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 		{
 			name: "ledger-floor only",
 			opts: Options{
-				RetainedLedgers: 50,
+				MinLedger: 50,
 			},
 			ingestionState: &store.IngestionState{
 				LastIngestedLedger: 100,
@@ -114,8 +116,8 @@ func TestPrunerArithmeticCoverage_BatchingAndCounts(t *testing.T) {
 	}
 
 	p := New(st, slog.Default(), Options{
-		BatchSize:       10,
-		RetainedLedgers: 100,
+		BatchSize: 10,
+		MinLedger: 100,
 	})
 
 	err := p.Run(ctx)
@@ -130,7 +132,7 @@ func TestPrunerArithmeticCoverage_PartialFailure(t *testing.T) {
 	}
 
 	p := New(st, slog.Default(), Options{
-		RetainedLedgers: 100,
+		MinLedger: 100,
 	})
 	err := p.Run(ctx)
 	assert.Error(t, err)
