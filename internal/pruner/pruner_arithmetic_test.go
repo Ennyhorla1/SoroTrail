@@ -116,6 +116,10 @@ func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, maxLedger i
 	return int64(m.deleteCount), m.deleteErr
 }
 
+func (m *mockArithmeticStore) CountEvents(ctx context.Context, filter store.EventFilter) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint32, t time.Time, limit int) (int64, error) {
 	if m.deleteErr != nil {
 		return 0, m.deleteErr
