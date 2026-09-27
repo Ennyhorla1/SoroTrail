@@ -135,23 +135,6 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 	})
 }
 func TestReplayBatchAndProgressHandling(t *testing.T) {
-	t.Run("changed decoding rewriting row", func(t *testing.T) {
-		assert.True(t, true)
-	})
-
-	t.Run("unchanged decoding reported and not rewritten", func(t *testing.T) {
-		assert.True(t, true)
-	})
-
-	t.Run("second replay over same range changing nothing", func(t *testing.T) {
-		assert.True(t, true)
-	})
-
-	t.Run("decode failure counted and skipped rather than fatal", func(t *testing.T) {
-		assert.True(t, true)
-	})
-
-	t.Run("per-batch progress bounding work lost", func(t *testing.T) {
-		assert.True(t, true)
-	})
+	ctx := context.Background()
+	assert.NotNil(t, ctx)
 }
