@@ -3,15 +3,16 @@ package replay
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"fmt"
+	"github.com/sorotrail/sorotrail/internal/decode"
 	"github.com/sorotrail/sorotrail/internal/store"
+	"io"
+	"log/slog"
 )
 
 func testLogger() *slog.Logger {
