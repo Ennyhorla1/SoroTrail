@@ -12,9 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-
-
-
 func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
