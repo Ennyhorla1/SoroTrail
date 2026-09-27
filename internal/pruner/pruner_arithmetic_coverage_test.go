@@ -18,33 +18,6 @@ type Config struct {
 	BatchSize       int
 }
 
-type mockArithmeticStore struct {
-	store.Store
-	ingestionState *store.IngestionState
-	lockCalled     bool
-	unlockCalled   bool
-	deleteCount    int64
-	deleteErr      error
-}
-
-func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (*store.IngestionState, error) {
-	return m.ingestionState, nil
-}
-
-func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger uint32, t time.Time) (int64, error) {
-	return m.deleteCount, m.deleteErr
-}
-
-func (m *mockArithmeticStore) LockPruner(ctx context.Context) (bool, error) {
-	m.lockCalled = true
-	return true, nil
-}
-
-func (m *mockArithmeticStore) UnlockPruner(ctx context.Context) error {
-	m.unlockCalled = true
-	return nil
-}
-
 func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint32, t time.Time, limit int) (int64, error) {
 	if m.deleteErr != nil {
 		return 0, m.deleteErr
