@@ -107,14 +107,25 @@ func (m *MockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBat
 	return nil
 }
 
-type mockDecoder struct {
+type replayMockDecoder struct {
 	decode.Decoder
 	RewriteFn func(rawXDR string) (json.RawMessage, json.RawMessage, error)
 	FailCount int
 	Calls     int
 }
 
-func (md *mockDecoder) DecodeEventXDR(rawXDR string) (json.RawMessage, json.RawMessage, error) {
+func (md *replayMockDecoder) DecodeEventXDR(rawXDR string) (json.RawMessage, json.RawMessage, error) {
+	md.Calls++
+	if md.FailCount > 0 && md.Calls <= md.FailCount {
+		return nil, nil, assert.AnError
+	}
+	if md.RewriteFn != nil {
+		return md.RewriteFn(rawXDR)
+	}
+	return json.RawMessage(`[]`), json.RawMessage(`{}`), nil
+}
+
+func (md *replayMockDecoder) DecodeEventXDRLegacy(rawXDR string) (json.RawMessage, json.RawMessage, error) {
 	md.Calls++
 	if md.FailCount > 0 && md.Calls <= md.FailCount {
 		return nil, nil, assert.AnError
@@ -139,7 +150,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				},
 			},
 		}
-		dec := &mockDecoder{
+		dec := &replayMockDecoder{
 			RewriteFn: func(raw string) (json.RawMessage, json.RawMessage, error) {
 				return json.RawMessage(`[{"new":true}]`),
 					json.RawMessage(`{"new":true}`),
@@ -170,7 +181,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				},
 			},
 		}
-		dec := &mockDecoder{
+		dec := &replayMockDecoder{
 			RewriteFn: func(raw string) (json.RawMessage, json.RawMessage, error) {
 				return topics, val, nil
 			},
@@ -198,7 +209,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				},
 			},
 		}
-		dec := &mockDecoder{
+		dec := &replayMockDecoder{
 			RewriteFn: func(raw string) (json.RawMessage, json.RawMessage, error) {
 				return topics, val, nil
 			},
@@ -224,7 +235,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				},
 			},
 		}
-		dec := &mockDecoder{
+		dec := &replayMockDecoder{
 			FailCount: 1,
 		}
 
@@ -240,7 +251,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{ID: "2", Ledger: 21, RawXDR: "X2"},
 			},
 		}
-		dec := &mockDecoder{
+		dec := &replayMockDecoder{
 			RewriteFn: func(raw string) (json.RawMessage, json.RawMessage, error) {
 				return json.RawMessage(`[]`), json.RawMessage(`{}`), nil
 			},
@@ -250,23 +261,6 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(21), st.ReplayState.LastLedger)
 	})
-}
-
-type ReplayMockStore struct {
-	store.Store
-	Events      []store.Event
-	Batches     []store.EventDecoding
-	ReplayState store.ReplayState
-	SaveErr     error
-	CommitErr   error
-	QueryErr    error
-}
-
-type mockDecoder struct {
-	decode.Decoder
-	RewriteFn func(rawXDR string) (json.RawMessage, json.RawMessage, error)
-	FailCount int
-	Calls     int
 }
 
 func TestReplay_BatchAndProgressHandlingStub(t *testing.T) {
