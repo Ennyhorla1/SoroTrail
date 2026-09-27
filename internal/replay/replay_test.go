@@ -1,17 +1,19 @@
+//go:build integration
+
 package replay
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
 	"testing"
 
+	"encoding/json"
+	"fmt"
+	"github.com/sorotrail/sorotrail/internal/store"
+	"github.com/sorotrail/sorotrail/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/sorotrail/sorotrail/internal/store"
+	"io"
+	"log/slog"
 )
 
 func testLogger() *slog.Logger {
@@ -280,4 +282,18 @@ func TestJSONEqual(t *testing.T) {
 			assert.Equal(t, tt.want, jsonEqual(json.RawMessage(tt.a), json.RawMessage(tt.b)))
 		})
 	}
+}
+
+// mockStore implements a stub store for replay testing.
+type mockStore struct {
+	store.Store
+	batches []store.ReplayBatch
+}
+
+func (m *mockStore) FetchReplayBatch(ctx context.Context, fromLedger, toLedger int64, batchSize int) ([]store.ReplayBatch, error) {
+	return m.batches, nil
+}
+
+func (m *mockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBatch) error {
+	return nil
 }
