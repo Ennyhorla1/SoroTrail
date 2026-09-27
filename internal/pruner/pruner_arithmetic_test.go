@@ -9,6 +9,7 @@ import (
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"log/slog"
 	"sync"
 )
 
@@ -311,4 +312,42 @@ func TestPrunerArithmetic_Disabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, count)
 	assert.Equal(t, 0, store.pruneCalls)
+}
+func TestPrunerDeletionArithmeticCoverage(t *testing.T) {
+	t.Run("age-based and ledger-floor bounds alone and combined", func(t *testing.T) {
+		st := newMockStore()
+		st.setIngestionState(100)
+		now := time.Now()
+
+		// Event 1: old and low ledger
+		st.addEvent("e1", 30, now.Add(-48*time.Hour))
+		// Event 2: old but high ledger
+		st.addEvent("e2", 90, now.Add(-48*time.Hour))
+		// Event 3: recent but low ledger
+		st.addEvent("e3", 30, now.Add(-30*time.Minute))
+
+		prn := New(st, slog.New(slog.NewTextHandler(nopWriter{}, nil)), Options{
+			MinLedger: 50,
+			MaxAge:    24 * time.Hour,
+			BatchSize: 10,
+		})
+		require.True(t, prn.Enabled())
+
+		total, err := prn.pruneOnce(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), total)
+	})
+
+	t.Run("disabled pruner deletes nothing", func(t *testing.T) {
+		st := newMockStore()
+		st.setIngestionState(100)
+		st.addEvent("e1", 30, time.Now().Add(-48*time.Hour))
+
+		prn := New(st, slog.New(slog.NewTextHandler(nopWriter{}, nil)), Options{})
+		assert.False(t, prn.Enabled())
+
+		total, err := prn.pruneOnce(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), total)
+	})
 }
