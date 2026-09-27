@@ -114,6 +114,13 @@ func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, maxLedger i
 	return int64(m.deleteCount), m.deleteErr
 }
 
+func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint32, t time.Time, limit int) (int64, error) {
+	if m.deleteErr != nil {
+		return 0, m.deleteErr
+	}
+	return int64(m.deleteCount), nil
+}
+
 func (m *mockArithmeticStore) LockPruner(ctx context.Context) (bool, error) {
 	m.Lock()
 	m.lockCalled = true
@@ -150,7 +157,7 @@ func (m *mockArithmeticStore) DeleteEventsBefore(ctx context.Context, maxLedger 
 func TestPrunerDeletionArithmetic(t *testing.T) {
 	t.Run("disabled pruner deletes nothing", func(t *testing.T) {
 		st := &mockArithmeticStore{}
-		p := New(st, nil, Options{MinLedger: 0, MaxAge: 0, BatchSize: 100, Enabled: false})
+		p := New(st, nil, Options{MinLedger: 0, MaxAge: 0, BatchSize: 100})
 		err := p.Run(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 0, st.deleteCalledCount)
