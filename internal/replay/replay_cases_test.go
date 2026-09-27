@@ -10,11 +10,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type mockDecoder struct {
+	decodeFn func([]byte) ([]byte, error)
+}
+
 func (d *mockDecoder) Decode(data []byte) ([]byte, error) {
 	if d.decodeFn != nil {
 		return d.decodeFn(data)
 	}
 	return data, nil
+}
+
+type replayMockDecoder struct {
+	Calls     int
+	FailCount int
+	RewriteFn func(string) (json.RawMessage, error)
 }
 
 type mockStore struct {
@@ -101,6 +111,10 @@ type mockLock struct {
 
 func (m *mockLock) Release(ctx context.Context) error {
 	m.released = true
+	return nil
+}
+
+func (m *mockLock) KeepAlive(ctx context.Context) error {
 	return nil
 }
 
