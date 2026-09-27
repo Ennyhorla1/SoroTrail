@@ -34,19 +34,6 @@ func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.
 	return nil, nil
 }
 
-func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deleteCalledCount++
-	m.deletedLedgers = append(m.deletedLedgers, maxLedger)
-	m.deletedAgeSeconds = append(m.deletedAgeSeconds, maxAgeSeconds)
-	m.deletedBatchSizes = append(m.deletedBatchSizes, batchSize)
-	if m.deleteFunc != nil {
-		return m.deleteFunc(ctx, maxLedger, maxAgeSeconds, batchSize)
-	}
-	return 10, nil
-}
-
 func TestPrunerDeletionArithmeticCoverage(t *testing.T) {
 	logger := slog.Default()
 
