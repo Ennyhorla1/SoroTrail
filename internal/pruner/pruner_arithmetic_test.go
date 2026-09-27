@@ -128,6 +128,9 @@ func (m *mockArithmeticStore) CountContracts(context.Context, store.ContractsFil
 func (m *mockArithmeticStore) CountEventsBefore(context.Context, int64, time.Time) (int64, error) {
 	return 0, nil
 }
+func (m *mockArithmeticStore) AggregateEvents(context.Context, store.EventFilter, store.Scope) ([]any, error) {
+	return nil, nil
+}
 
 func TestPrunerDeletionArithmetic_Cases(t *testing.T) {
 	now := time.Now()
