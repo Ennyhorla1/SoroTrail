@@ -10,6 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type mockDecoder struct {
+	decodeFn func([]byte) ([]byte, error)
+}
+
 func (d *mockDecoder) Decode(data []byte) ([]byte, error) {
 	if d.decodeFn != nil {
 		return d.decodeFn(data)
