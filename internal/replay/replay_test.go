@@ -1,14 +1,11 @@
-//go:build integration
-
 package replay
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
+	"encoding/json"
 	"fmt"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
 	"github.com/stretchr/testify/assert"
@@ -24,6 +21,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 	_, _ = ctx, st
 	assert.True(t, true)
 }
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -316,4 +314,8 @@ func (m *mockStore) FetchReplayBatch(ctx context.Context, fromLedger, toLedger i
 
 func (m *mockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBatch) error {
 	return nil
+}
+func TestReplay_Placeholder(t *testing.T) {
+	// Ensure package compiles and basic test harness works
+	assert.True(t, true)
 }
