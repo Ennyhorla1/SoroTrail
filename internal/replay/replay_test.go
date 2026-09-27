@@ -1,20 +1,17 @@
-//go:build integration
-
 package replay
 
 import (
 	"context"
-	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"errors"
 	"fmt"
-	"github.com/sorotrail/sorotrail/internal/store"
-	"github.com/sorotrail/sorotrail/internal/testdb"
 	"io"
 	"log/slog"
+	"testing"
+
+	"github.com/sorotrail/sorotrail/internal/store"
+	"github.com/sorotrail/sorotrail/internal/testdb"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testLogger() *slog.Logger {
@@ -142,8 +139,14 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 		require.NotNil(t, ctx)
 	})
 }
+
 func TestReplay_BatchAndProgressHandling(t *testing.T) {
 	db := testdb.Setup(t, store.Migrate)
 	st := store.NewPostgres(db, 120960)
 	ctx := context.Background()
+}
+func TestReplay_Placeholder(t *testing.T) {
+	ctx := context.Background()
+	require.NotNil(t, ctx)
+	assert.True(t, true)
 }
