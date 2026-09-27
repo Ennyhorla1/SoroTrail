@@ -2,16 +2,23 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
-	"encoding/json"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"sorotrail/SoroTrail/internal/replay"
-	"sorotrail/SoroTrail/internal/store"
 )
+
+type MockStore struct {
+	store.ReplayStore
+	ReplayState store.ReplayState
+	Events      []store.DecodedEvent
+	Batches     []store.ReplayBatch
+	QueryErr    error
+	CommitErr   error
+}
 
 func (m *MockStore) GetReplayState(ctx context.Context) (store.ReplayState, error) {
 	return m.ReplayState, nil
@@ -56,6 +63,12 @@ func (m *MockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBat
 	return nil
 }
 
+type replayMockDecoder struct {
+	Calls     int
+	FailCount int
+	RewriteFn func(string) (json.RawMessage, error)
+}
+
 func (md *replayMockDecoder) DecodeScVal(rawXDR string) (json.RawMessage, error) {
 	md.Calls++
 	if md.FailCount > 0 && md.Calls <= md.FailCount {
@@ -67,13 +80,15 @@ func (md *replayMockDecoder) DecodeScVal(rawXDR string) (json.RawMessage, error)
 	return json.RawMessage(`{}`), nil
 }
 
-func TestReplayLockInterface(t *testing.T) {
-	var l store.ReplayLock = &mockLock{}
-	err := l.Release()
-	assert.NoError(t, err)
+type mockLock struct {
+	released bool
 }
 
-// mockStore implements store.ReplayStore for testing replay batch and progress handling.
+func (m *mockLock) Release(ctx context.Context) error {
+	m.released = true
+	return nil
+}
+
 type mockStore struct {
 	store.ReplayStore
 	locks     []store.ReplayLock
@@ -82,15 +97,6 @@ type mockStore struct {
 	readErr   error
 	writeRows []store.ReplayRow
 	writeErr  error
-}
-
-type mockLock struct {
-	released bool
-}
-
-func (m *mockLock) Release(ctx context.Context) error {
-	m.released = true
-	return nil
 }
 
 func (m *mockStore) AcquireReplayLock(ctx context.Context, name string) (store.ReplayLock, error) {
@@ -135,6 +141,12 @@ func (d *mockDecoder) Decode(data []byte) ([]byte, error) {
 	return data, nil
 }
 
+func TestReplayLockInterface(t *testing.T) {
+	var l store.ReplayLock = &mockLock{}
+	err := l.Release(context.Background())
+	assert.NoError(t, err)
+}
+
 func TestReplayBatchAndProgressHandling(t *testing.T) {
 	t.Run("changed decoding rewriting the row", func(t *testing.T) {
 		ms := &mockStore{
@@ -147,7 +159,7 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 				return []byte("new-data"), nil
 			},
 		}
-		r := replay.NewReplayer(ms, dec, replay.WithBatchSize(1))
+		r := New(ms, dec, nil, Options{BatchSize: 1})
 		err := r.Run(context.Background())
 		require.NoError(t, err)
 		assert.Len(t, ms.writeRows, 1)
@@ -165,7 +177,7 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 				return []byte("same-data"), nil
 			},
 		}
-		r := replay.NewReplayer(ms, dec, replay.WithBatchSize(1))
+		r := New(ms, dec, nil, Options{BatchSize: 1})
 		err := r.Run(context.Background())
 		require.NoError(t, err)
 		assert.Empty(t, ms.writeRows)
@@ -182,7 +194,7 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 				return []byte("final-data"), nil
 			},
 		}
-		r := replay.NewReplayer(ms, dec, replay.WithBatchSize(1))
+		r := New(ms, dec, nil, Options{BatchSize: 1})
 		err := r.Run(context.Background())
 		require.NoError(t, err)
 		assert.Empty(t, ms.writeRows)
@@ -203,7 +215,7 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 				return []byte("decoded-good"), nil
 			},
 		}
-		r := replay.NewReplayer(ms, dec, replay.WithBatchSize(2))
+		r := New(ms, dec, nil, Options{BatchSize: 2})
 		err := r.Run(context.Background())
 		require.NoError(t, err)
 		assert.Len(t, ms.writeRows, 1)
@@ -223,12 +235,10 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 				return append([]byte(nil), data...), nil
 			},
 		}
-		r := replay.NewReplayer(ms, dec, replay.WithBatchSize(1))
+		r := New(ms, dec, nil, Options{BatchSize: 1})
 		ctx, cancel := context.WithCancel(context.Background())
-		// Cancel immediately after first batch or let it run
 		cancel()
 		err := r.Run(ctx)
-		// Depending on context check, it may return context.Canceled or succeed if checked per batch
 		if err != nil {
 			assert.ErrorIs(t, err, context.Canceled)
 		}
