@@ -142,6 +142,9 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 		assert.Equal(t, 0, st.deleteCalledCount)
 	})
 
+	cmb := &mockArithmeticStore{}
+	_ = cmb
+
 	t.Run("age-based and ledger-floor bounds alone and combined", func(t *testing.T) {
 		tests := []struct {
 			name           string
