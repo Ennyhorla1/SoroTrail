@@ -16,14 +16,6 @@ import (
 	"log/slog"
 )
 
-func TestReplay_BatchAndProgressHandling(t *testing.T) {
-	pool := testdb.Setup(t, store.Migrate)
-	st := store.NewPostgres(pool, 120960)
-	ctx := context.Background(), context.Background()
-	_, _ = ctx, st
-	assert.True(t, true)
-}
-
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -310,6 +302,7 @@ func TestReplay_Placeholder(t *testing.T) {
 	// Ensure package compiles and basic test harness works
 	assert.True(t, true)
 }
+
 func TestReplayBatchAndProgressHandling(t *testing.T) {
 	pool := testdb.Setup(t, store.Migrate)
 	ctx := context.Background()
@@ -318,4 +311,25 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.NotNil(t, pool)
+}
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	st := store.NewPostgres(pool, int64(store.DefaultEventPartitionSpan))
+	ctx := context.Background()
+
+	_, err := st.UpsertEvents(ctx, []store.Event{
+		{
+			ID:          "0000000000000001000",
+			Ledger:      10,
+			ContractID:  "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			TopicXDR:    []string{"AAAAAQ=="},
+			ValueXDR:    "AAAAAQ==",
+			DecodedJson: []byte(`{"value":1}`),
+		},
+	})
+	require.NoError(t, err)
+
+	state, err := st.GetReplayState(ctx)
+	require.NoError(t, err)
+	assert.NotNil(t, state)
 }
