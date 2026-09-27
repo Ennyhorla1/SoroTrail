@@ -15,7 +15,7 @@ func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint
 	if m.deleteErr != nil {
 		return 0, m.deleteErr
 	}
-	return m.deleteCount, nil
+	return int64(m.deleteCount), nil
 }
 
 type Config struct {
