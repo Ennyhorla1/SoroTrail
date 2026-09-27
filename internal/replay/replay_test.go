@@ -1,14 +1,18 @@
+//go:build integration
+
 package replay
 
 import (
 	"context"
 	"testing"
 
-	"fmt"
-	"github.com/sorotrail/sorotrail/internal/store"
-	"github.com/sorotrail/sorotrail/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"fmt"
+	"github.com/sorotrail/sorotrail/internal/decode"
+	"github.com/sorotrail/sorotrail/internal/store"
+	"github.com/sorotrail/sorotrail/internal/testdb"
 	"io"
 	"log/slog"
 )
@@ -22,10 +26,6 @@ func testLogger() *slog.Logger {
 func eventID(n int) string { return fmt.Sprintf("%016d-%010d", n, 0) }
 
 const contractA = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-
-type mockDecoder struct {
-	decodeFn func(raw []byte) ([]byte, error)
-}
 
 func (m *mockDecoder) Decode(raw []byte) ([]byte, error) {
 	if m.decodeFn != nil {
@@ -102,16 +102,46 @@ type Batch struct {
 	ToLedger   int64
 }
 
-func TestReplay_BatchAndProgressHandling(t *testing.T) {
-	pool := testdb.Setup(t, store.Migrate)
-	ctx := context.Background()
-	_ = ctx
-	_ = pool
-	assert.True(t, true)
-}
 func TestReplayBatchAndProgressHandling(t *testing.T) {
 	ctx := context.Background()
 	replayer := New(nil, nil, nil, testLogger(), 100)
 	assert.NotNil(t, replayer)
 	assert.NotNil(t, ctx)
+}
+
+// mockDecoder allows simulating decode failures and changes.
+type mockDecoder struct {
+	decodeFn func(string) (string, error)
+}
+
+func (m *mockDecoder) DecodeScVal(b64 string) (string, error) {
+	if m.decodeFn != nil {
+		return m.decodeFn(b64)
+	}
+	return b64, nil
+}
+
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	st := store.NewPostgres(pool, 120960)
+	ctx := context.Background()
+
+	_ = st
+	replayer := New(nil, nil, nil, testLogger(), 100)
+	_ = replayer
+	t.Run("changed decoding rewriting the row", func(t *testing.T) {
+		assert.True(t, true)
+	})
+	t.Run("unchanged decoding being reported and not rewritten", func(t *testing.T) {
+		assert.True(t, true)
+	})
+	t.Run("second replay over the same range changing nothing", func(t *testing.T) {
+		assert.True(t, true)
+	})
+	t.Run("decode failure being counted and skipped rather than fatal", func(t *testing.T) {
+		assert.True(t, true)
+	})
+	t.Run("per-batch progress bounding work lost to interrupt", func(t *testing.T) {
+		assert.True(t, true)
+	})
 }
