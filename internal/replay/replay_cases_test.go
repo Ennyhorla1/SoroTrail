@@ -74,7 +74,7 @@ func (m *MockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBat
 			}
 		}
 	}
-	m.ReplayState.ToLedger = batch.ToLedger
+	m.ReplayState = batch.State
 	return nil
 }
 
@@ -106,7 +106,6 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{
 					ID:     "0000000000000001-000",
 					Ledger: 10,
-					Data:   []byte("AAAAB=="),
 					Topics: json.RawMessage(`[{"old":true}]`),
 					Value:  json.RawMessage(`{"old":true}`),
 				},
@@ -134,7 +133,6 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{
 					ID:     "0000000000000002-000",
 					Ledger: 11,
-					Data:   []byte("BBB=="),
 					Value:  val,
 				},
 			},
@@ -161,7 +159,6 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{
 					ID:     "0000000000000003-000",
 					Ledger: 12,
-					Data:   []byte("CCC=="),
 					Value:  val,
 				},
 			},
@@ -188,7 +185,6 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{
 					ID:     "0000000000000004-000",
 					Ledger: 13,
-					Data:   []byte("BAD=="),
 					Value:  json.RawMessage(`{}`),
 				},
 			},
@@ -206,8 +202,8 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		ctx := context.Background()
 		st := &MockStore{
 			Events: []store.DecodedEvent{
-				{ID: "1", Ledger: 20, Data: []byte("X1")},
-				{ID: "2", Ledger: 21, Data: []byte("X2")},
+				{ID: "1", Ledger: 20},
+				{ID: "2", Ledger: 21},
 			},
 		}
 		dec := &replayMockDecoder{
@@ -219,7 +215,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		r := New(st, dec, slog.Default(), Options{FromLedger: 20, ToLedger: 21, BatchSize: 1})
 		_, err := r.Run(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, int64(21), st.ReplayState.ToLedger)
+		assert.Equal(t, int64(21), st.ReplayState.LastLedger)
 	})
 }
 
