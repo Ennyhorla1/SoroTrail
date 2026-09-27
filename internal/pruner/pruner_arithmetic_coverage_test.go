@@ -1,16 +1,12 @@
 package pruner
 
-import (
-	"context"
-	"log/slog"
-	"testing"
-	"time"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	"github.com/sorotrail/sorotrail/internal/store"
-)
+import "context"
+import "log/slog"
+import "testing"
+import "time"
+import "github.com/stretchr/testify/assert"
+import "github.com/stretchr/testify/require"
+import "github.com/sorotrail/sorotrail/internal/store"
 
 type Config struct {
 	Enabled         bool
