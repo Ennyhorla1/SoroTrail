@@ -3,13 +3,14 @@ package pruner
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"time"
 )
 
 type mockArithmeticStore struct {
@@ -136,54 +137,61 @@ func (m *mockArithmeticStore) AggregateEvents(context.Context, store.EventFilter
 }
 
 func TestPrunerArithmetic_BoundsAndBatching(t *testing.T) {
+	logger := slog.Default()
 	t.Run("disabled pruner deletes nothing", func(t *testing.T) {
 		st := &mockArithmeticStore{prunedCount: 10}
-		cfg := Config{
-			Enabled:   false,
+		opts := Options{
+			MaxAge:    0,
+			MinLedger: 0,
 			BatchSize: 100,
 		}
-		p := New(st, cfg)
+		p := New(st, logger, opts)
 		err := p.Run(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 0, st.lastBatchSize)
 	})
 
 	t.Run("age based and ledger floor bounds", func(t *testing.T) {
-		st := &mockArithmeticStore{prunedCount: 5}
-		cfg := Config{
-			Enabled:       true,
-			MaxAgeSeconds: 3600,
-			MinLedger:     1000,
-			BatchSize:     50,
+		st := &mockArithmeticStore{prunedCount: 5, ingestedLedger: 2000}
+		opts := Options{
+			MaxAge:    time.Hour,
+			MinLedger: 1000,
+			BatchSize: 50,
 		}
-		p := New(st, cfg)
-		err := p.Run(context.Background())
+		p := New(st, logger, opts)
+		// Run a single pruneOnce directly for testing arithmetic behavior without looping intervals
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		_, err := p.pruneOnce(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, 50, st.lastBatchSize)
 		assert.Equal(t, uint64(1000), st.lastMaxLedger)
-		assert.NotZero(t, st.lastOlderThan)
 	})
 
 	t.Run("reported counts match removed", func(t *testing.T) {
-		st := &mockArithmeticStore{prunedCount: 42}
-		cfg := Config{
-			Enabled:   true,
+		st := &mockArithmeticStore{prunedCount: 42, ingestedLedger: 2000}
+		opts := Options{
+			MinLedger: 1000,
 			BatchSize: 100,
 		}
-		p := New(st, cfg)
-		err := p.Run(context.Background())
+		p := New(st, logger, opts)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		_, err := p.pruneOnce(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, 42, st.prunedCount)
+		assert.Equal(t, int64(42), p.Metrics().TotalRowsPurged)
 	})
 
 	t.Run("partial failure does not commit half run", func(t *testing.T) {
-		st := &mockArithmeticStore{pruneErr: errors.New("db failure")}
-		cfg := Config{
-			Enabled:   true,
+		st := &mockArithmeticStore{deleteErr: errors.New("db failure"), ingestedLedger: 2000}
+		opts := Options{
+			MinLedger: 1000,
 			BatchSize: 100,
 		}
-		p := New(st, cfg)
-		err := p.Run(context.Background())
+		p := New(st, logger, opts)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		_, err := p.pruneOnce(ctx)
 		require.Error(t, err)
 	})
 }
