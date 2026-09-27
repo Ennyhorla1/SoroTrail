@@ -2,14 +2,14 @@ package pruner
 
 import (
 	"context"
-	"errors"
-	"sync"
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sync"
 )
 
 func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
@@ -266,4 +266,49 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 		assert.Error(t, err)
 		assert.True(t, st.unlockCalled)
 	})
+}
+
+type mockStore struct {
+	pruneCalls    int
+	pruneErr      error
+	prunedCount   int64
+	lastMaxLedger int64
+	lastMaxAge    time.Duration
+}
+
+func (m *mockStore) Prune(ctx context.Context, maxLedger int64, maxAge time.Duration, batchSize int) (int64, error) {
+	m.pruneCalls++
+	m.lastMaxLedger = maxLedger
+	m.lastMaxAge = maxAge
+	return m.prunedCount, m.pruneErr
+}
+
+func TestPrunerArithmetic_Bounds(t *testing.T) {
+	store := &mockStore{prunedCount: 10}
+	p := New(store, Config{
+		Enabled:   true,
+		MaxAge:    24 * time.Hour,
+		MaxLedger: 100,
+		BatchSize: 1000,
+	})
+
+	ctx := context.Background()
+	count, err := p.PruneOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), count)
+	assert.Equal(t, int64(100), store.lastMaxLedger)
+	assert.Equal(t, 24*time.Hour, store.lastMaxAge)
+}
+
+func TestPrunerArithmetic_Disabled(t *testing.T) {
+	store := &mockStore{}
+	p := New(store, Config{
+		Enabled: false,
+	})
+
+	ctx := context.Background()
+	count, err := p.PruneOnce(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+	assert.Equal(t, 0, store.pruneCalls)
 }
