@@ -215,7 +215,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		r := New(st, dec, slog.Default(), Options{FromLedger: 20, ToLedger: 21, BatchSize: 1})
 		_, err := r.Run(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, int64(21), st.ReplayState.LastLedger)
+		assert.Equal(t, int64(21), st.ReplayState.ToLedger)
 	})
 }
 
