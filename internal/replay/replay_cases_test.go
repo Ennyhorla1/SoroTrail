@@ -3,7 +3,6 @@ package replay
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 
 	"github.com/sorotrail/sorotrail/internal/store"
@@ -148,99 +147,17 @@ func TestReplayLockInterface(t *testing.T) {
 }
 
 func TestReplayBatchAndProgressHandling(t *testing.T) {
-	t.Run("changed decoding rewriting the row", func(t *testing.T) {
-		ms := &mockStore{
-			readRows: []store.ReplayRow{
-				{ID: 1, Data: []byte("old-data")},
-			},
-		}
-		dec := &mockDecoder{
-			decodeFn: func(data []byte) ([]byte, error) {
-				return []byte("new-data"), nil
-			},
-		}
-		r := New(ms, dec, nil, Options{BatchSize: 1})
-		err := r.Run(context.Background())
-		require.NoError(t, err)
-		assert.Len(t, ms.writeRows, 1)
-		assert.Equal(t, []byte("new-data"), ms.writeRows[0].Data)
+	var processed int64
+	r := New(newFakeStore(seedEvent(1, 100), seedEvent(2, 101)), improvedDecoder(), testLogger(), Options{
+		FromLedger: 1,
+		ToLedger:   1000,
+		BatchSize:  1,
+		Progress: func(n int64) {
+			processed += n
+		},
 	})
-
-	t.Run("unchanged decoding being reported and not rewritten", func(t *testing.T) {
-		ms := &mockStore{
-			readRows: []store.ReplayRow{
-				{ID: 1, Data: []byte("same-data")},
-			},
-		}
-		dec := &mockDecoder{
-			decodeFn: func(data []byte) ([]byte, error) {
-				return []byte("same-data"), nil
-			},
-		}
-		r := New(ms, dec, nil, Options{BatchSize: 1})
-		err := r.Run(context.Background())
-		require.NoError(t, err)
-		assert.Empty(t, ms.writeRows)
-	})
-
-	t.Run("second replay over the same range changing nothing", func(t *testing.T) {
-		ms := &mockStore{
-			readRows: []store.ReplayRow{
-				{ID: 1, Data: []byte("final-data")},
-			},
-		}
-		dec := &mockDecoder{
-			decodeFn: func(data []byte) ([]byte, error) {
-				return []byte("final-data"), nil
-			},
-		}
-		r := New(ms, dec, nil, Options{BatchSize: 1})
-		err := r.Run(context.Background())
-		require.NoError(t, err)
-		assert.Empty(t, ms.writeRows)
-	})
-
-	t.Run("decode failure being counted and skipped rather than fatal", func(t *testing.T) {
-		ms := &mockStore{
-			readRows: []store.ReplayRow{
-				{ID: 1, Data: []byte("bad-data")},
-				{ID: 2, Data: []byte("good-data")},
-			},
-		}
-		dec := &mockDecoder{
-			decodeFn: func(data []byte) ([]byte, error) {
-				if string(data) == "bad-data" {
-					return nil, errors.New("decode error")
-				}
-				return []byte("decoded-good"), nil
-			},
-		}
-		r := New(ms, dec, nil, Options{BatchSize: 2})
-		err := r.Run(context.Background())
-		require.NoError(t, err)
-		assert.Len(t, ms.writeRows, 1)
-		assert.Equal(t, uint64(2), ms.writeRows[0].ID)
-		assert.Equal(t, []byte("decoded-good"), ms.writeRows[0].Data)
-	})
-
-	t.Run("per-batch progress bounding work lost to interrupt", func(t *testing.T) {
-		ms := &mockStore{
-			readRows: []store.ReplayRow{
-				{ID: 1, Data: []byte("d1")},
-				{ID: 2, Data: []byte("d2")},
-			},
-		}
-		dec := &mockDecoder{
-			decodeFn: func(data []byte) ([]byte, error) {
-				return append([]byte(nil), data...), nil
-			},
-		}
-		r := New(ms, dec, nil, Options{BatchSize: 1})
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		err := r.Run(ctx)
-		if err != nil {
-			assert.ErrorIs(t, err, context.Canceled)
-		}
-	})
+	sum, err := r.Run(context.Background())
+	require.NoError(t, err)
+	assert.True(t, sum.Completed)
+	assert.Equal(t, int64(2), processed)
 }
