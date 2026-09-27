@@ -30,7 +30,7 @@ func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.Inge
 	return store.IngestionState{Network: "default", LastIngestedLedger: 2000}, nil
 }
 
-func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, f store.EventFilter, scope store.Scope) ([]store.AggregateBucket, error) {
+func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.EventFilter, scope store.Scope) ([]store.AggregateBucket, error) {
 	return nil, nil
 }
 
