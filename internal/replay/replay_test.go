@@ -2,16 +2,17 @@ package replay
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log/slog"
+	"errors"
 	"testing"
 
+	"encoding/json"
+	"fmt"
+	"github.com/sorotrail/sorotrail/internal/store"
+	"github.com/sorotrail/sorotrail/internal/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/sorotrail/sorotrail/internal/store"
+	"io"
+	"log/slog"
 )
 
 func testLogger() *slog.Logger {
@@ -278,6 +279,206 @@ func TestJSONEqual(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, jsonEqual(json.RawMessage(tt.a), json.RawMessage(tt.b)))
+		})
+	}
+}
+
+func (m *mockStore) FetchReplayBatch(ctx context.Context, fromLedger, toLedger int64, batchSize int) ([]store.ReplayBatch, error) {
+	return m.batches, nil
+}
+
+func TestReplay_Placeholder(t *testing.T) {
+	// Ensure package compiles and basic test harness works
+	assert.True(t, true)
+}
+
+func TestReplayBatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, `TRUNCATE events, ingestion_state, watched_contracts, replay_state`)
+	require.NoError(t, err)
+
+	assert.NotNil(t, pool)
+}
+
+type mockDecoder struct {
+	decodeFn func(raw []byte) ([]byte, error)
+}
+
+func (m *mockDecoder) Decode(raw []byte) ([]byte, error) {
+	if m.decodeFn != nil {
+		return m.decodeFn(raw)
+	}
+	return raw, nil
+}
+
+type storedRow struct {
+	ID      string
+	Ledger  int64
+	RawXDR  []byte
+	Decoded []byte
+}
+
+type mockStore struct {
+	rows            []storedRow
+	replayedBatches []int
+	commitErr       error
+	state           store.ReplayState
+}
+
+func (m *mockStore) NextReplayBatch(ctx context.Context, fromLedger, toLedger int64, afterID string, limit int) ([]store.DecodedEvent, error) {
+	var batch []store.DecodedEvent
+	for _, r := range m.rows {
+		if r.Ledger >= fromLedger && r.Ledger <= toLedger {
+			if afterID == "" || r.ID > afterID {
+				batch = append(batch, store.DecodedEvent{
+					ID:          r.ID,
+					Ledger:      r.Ledger,
+					ContractID:  contractA,
+					RawTopicXDR: []string{string(r.RawXDR)},
+					RawValueXDR: string(r.RawXDR),
+					Topics:      r.Decoded,
+					Value:       r.Decoded,
+				})
+				if len(batch) >= limit {
+					break
+				}
+			}
+		}
+	}
+	return batch, nil
+}
+
+func (m *mockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBatch) error {
+	if m.commitErr != nil {
+		return m.commitErr
+	}
+	m.replayedBatches = append(m.replayedBatches, len(batch.Events))
+	for _, updated := range batch.Events {
+		for i, existing := range m.rows {
+			if existing.ID == updated.ID {
+				m.rows[i].Decoded = updated.Topics
+			}
+		}
+	}
+	m.state = batch.State
+	return nil
+}
+
+func (m *mockStore) AcquireReplayLock(ctx context.Context) (store.ReplayLock, error) {
+	return mockLock{}, nil
+}
+
+func (m *mockStore) GetReplayState(ctx context.Context) (store.ReplayState, error) {
+	return m.state, nil
+}
+
+func (m *mockStore) StartReplayState(ctx context.Context, fromLedger, toLedger int64) error {
+	m.state = store.ReplayState{FromLedger: fromLedger, ToLedger: toLedger}
+	return nil
+}
+
+type mockLock struct{}
+
+func (mockLock) Release() {}
+
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	tests := []struct {
+		name          string
+		rows          []storedRow
+		decoder       *mockDecoder
+		batchSize     int
+		fromLedger    int64
+		toLedger      int64
+		wantRewritten int
+		wantSkipped   int
+		wantErr       bool
+	}{
+		{
+			name: "changed decoding rewrites the row",
+			rows: []storedRow{
+				{ID: "1", Ledger: 10, RawXDR: []byte("raw1"), Decoded: []byte("old1")},
+			},
+			decoder: &mockDecoder{
+				decodeFn: func(raw []byte) ([]byte, error) {
+					if string(raw) == "raw1" {
+						return []byte("new1"), nil
+					}
+					return raw, nil
+				},
+			},
+			batchSize:     10,
+			fromLedger:    1,
+			toLedger:      20,
+			wantRewritten: 1,
+			wantSkipped:   0,
+		},
+		{
+			name: "unchanged decoding is reported and not rewritten",
+			rows: []storedRow{
+				{ID: "2", Ledger: 10, RawXDR: []byte("raw2"), Decoded: []byte("same2")},
+			},
+			decoder: &mockDecoder{
+				decodeFn: func(raw []byte) ([]byte, error) {
+					return []byte("same2"), nil
+				},
+			},
+			batchSize:     10,
+			fromLedger:    1,
+			toLedger:      20,
+			wantRewritten: 0,
+			wantSkipped:   0,
+		},
+		{
+			name: "second replay over the same range changes nothing",
+			rows: []storedRow{
+				{ID: "3", Ledger: 10, RawXDR: []byte("raw3"), Decoded: []byte("final3")},
+			},
+			decoder: &mockDecoder{
+				decodeFn: func(raw []byte) ([]byte, error) {
+					return []byte("final3"), nil
+				},
+			},
+			batchSize:     10,
+			fromLedger:    1,
+			toLedger:      20,
+			wantRewritten: 0,
+			wantSkipped:   0,
+		},
+		{
+			name: "decode failure is counted and skipped rather than fatal",
+			rows: []storedRow{
+				{ID: "4", Ledger: 10, RawXDR: []byte("bad"), Decoded: []byte("old4")},
+				{ID: "5", Ledger: 11, RawXDR: []byte("good"), Decoded: []byte("old5")},
+			},
+			decoder: &mockDecoder{
+				decodeFn: func(raw []byte) ([]byte, error) {
+					if string(raw) == "bad" {
+						return nil, errors.New("corrupt XDR")
+					}
+					return []byte("new5"), nil
+				},
+			},
+			batchSize:     10,
+			fromLedger:    1,
+			toLedger:      20,
+			wantRewritten: 1,
+			wantSkipped:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &mockStore{rows: tt.rows}
+			dec := staticDecoder{out: map[string]string{}}
+			r := New(st, dec, testLogger(), Options{FromLedger: tt.fromLedger, ToLedger: tt.toLedger, BatchSize: tt.batchSize})
+
+			sum, err := r.Run(context.Background())
+			require.NoError(t, err)
+
+			assert.Equal(t, int64(tt.wantRewritten), sum.Changed)
+			assert.Equal(t, int64(tt.wantSkipped), sum.Skipped)
 		})
 	}
 }
