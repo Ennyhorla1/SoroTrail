@@ -27,7 +27,6 @@ func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uin
 	}
 	return 10, nil
 }
-
 func (m *mockArithmeticStore) UpsertEvents(context.Context, []store.Event) (int64, error) {
 	return 0, nil
 }
