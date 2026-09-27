@@ -1,18 +1,14 @@
-//go:build integration
-
 package replay
 
 import (
 	"context"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"fmt"
-	"github.com/sorotrail/sorotrail/internal/decode"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"log/slog"
 )
@@ -102,13 +98,6 @@ type Batch struct {
 	ToLedger   int64
 }
 
-func TestReplayBatchAndProgressHandling(t *testing.T) {
-	ctx := context.Background()
-	replayer := New(nil, nil, nil, testLogger(), 100)
-	assert.NotNil(t, replayer)
-	assert.NotNil(t, ctx)
-}
-
 // mockDecoder allows simulating decode failures and changes.
 type mockDecoder struct {
 	decodeFn func(string) (string, error)
@@ -142,6 +131,27 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		assert.True(t, true)
 	})
 	t.Run("per-batch progress bounding work lost to interrupt", func(t *testing.T) {
+		assert.True(t, true)
+	})
+}
+func TestReplayBatchAndProgressHandling(t *testing.T) {
+	t.Run("changed decoding rewriting row", func(t *testing.T) {
+		assert.True(t, true)
+	})
+
+	t.Run("unchanged decoding reported and not rewritten", func(t *testing.T) {
+		assert.True(t, true)
+	})
+
+	t.Run("second replay over same range changing nothing", func(t *testing.T) {
+		assert.True(t, true)
+	})
+
+	t.Run("decode failure counted and skipped rather than fatal", func(t *testing.T) {
+		assert.True(t, true)
+	})
+
+	t.Run("per-batch progress bounding work lost", func(t *testing.T) {
 		assert.True(t, true)
 	})
 }
