@@ -72,8 +72,8 @@ func (m *mockArithmeticStore) CountContracts(context.Context, store.ContractsFil
 	return 0, nil
 }
 
-func (m *mockArithmeticStore) CountEventsBefore(context.Context, int64, time.Time) (int64, error) {
-	return 0, nil
+func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.EventFilter, scope string) ([]store.AggregateBucket, error) {
+	return nil, nil
 }
 
 type mockArithmeticStore struct {
@@ -83,7 +83,7 @@ type mockArithmeticStore struct {
 	unlockCalled      bool
 	ingestionState    *store.IngestionState
 	ingestionErr      error
-	deleteFunc        func(ctx context.Context, maxLedger int64, maxAge time.Time, batchSize int) (int64, error)
+	deleteFunc        func(ctx context.Context, maxLedger int64, beforeTime time.Time, batchSize int) (int64, error)
 	deleteCalledCount int
 	deletedLedgers    []int64
 	deletedBefore     []time.Time
@@ -111,6 +111,22 @@ func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.Inge
 	return store.IngestionState{Network: "default", LastIngestedLedger: 2000, LatestLedger: 2000, LatestLedgerTime: time.Now()}, m.ingestionErr
 }
 
+func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger int64, t time.Time) (int64, error) {
+	return int64(m.deleteCount), m.deleteErr
+}
+
+func (m *mockArithmeticStore) LockPruner(ctx context.Context) (bool, error) {
+	m.Lock()
+	m.lockCalled = true
+	return true, nil
+}
+
+func (m *mockArithmeticStore) UnlockPruner(ctx context.Context) error {
+	m.Unlock()
+	m.unlockCalled = true
+	return nil
+}
+
 func (m *mockArithmeticStore) DeleteEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time, limit int) (int64, error) {
 	m.Lock()
 	defer m.Unlock()
@@ -129,18 +145,7 @@ func (m *mockArithmeticStore) DeleteEventsBefore(ctx context.Context, maxLedger 
 	if limit > 0 && count > int64(limit) {
 		count = int64(limit)
 	}
-	if m.deleteCount > 0 {
-		m.deleteCount -= int(count)
-	}
 	return count, nil
-}
-
-func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.EventFilter, scope string) ([]store.AggregateBucket, error) {
-	return nil, nil
-}
-
-func (m *mockArithmeticStore) PruneEvents(ctx context.Context, olderThan int64, maxLedger uint64, batchSize int) (int, error) {
-	return 0, nil
 }
 
 func TestPrunerDeletionArithmetic(t *testing.T) {
@@ -229,7 +234,6 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 		}
 
 		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10, Enabled: true})
-		// pruneOnce returns the total purged rows in a single sweep
 		count, err := p.pruneOnce(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, int64(15), count)
@@ -248,6 +252,6 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10, Enabled: true})
 		err := p.Run(context.Background())
 		assert.Error(t, err)
-		assert.Equal(t, 2, st.deleteCalledCount)
+		assert.True(t, st.unlockCalled)
 	})
 }
