@@ -12,6 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+
+
+
 func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -27,7 +30,6 @@ func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uin
 	}
 	return 10, nil
 }
-
 func (m *mockArithmeticStore) UpsertEvents(context.Context, []store.Event) (int64, error) {
 	return 0, nil
 }
@@ -108,7 +110,7 @@ func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.Inge
 	if m.ingestionState != nil {
 		return *m.ingestionState, m.ingestionErr
 	}
-	return store.IngestionState{Network: "default", LastIngestedLedger: 2000, LatestLedger: 2000, LatestLedgerTime: time.Now()}, m.ingestionErr
+	return store.IngestionState{Network: "default", LastIngestedLedger: 2000, LatestLedgerTime: time.Now()}, m.ingestionErr
 }
 
 func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger int64, t time.Time) (int64, error) {
