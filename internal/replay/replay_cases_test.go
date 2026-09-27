@@ -74,7 +74,7 @@ func (m *MockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBat
 			}
 		}
 	}
-	m.ReplayState.LastLedger = batch.ToLedger
+	m.ReplayState.LastLedger = batch.EndLedger
 	return nil
 }
 
@@ -96,6 +96,8 @@ func (md *replayMockDecoder) DecodeScVal(rawXDR string) (json.RawMessage, error)
 	return json.RawMessage(`{}`), nil
 }
 
+func ptrStr(s string) *string { return &s }
+
 func TestReplay_BatchAndProgressHandling(t *testing.T) {
 	t.Run("changed decoding rewriting the row", func(t *testing.T) {
 		ctx := context.Background()
@@ -104,7 +106,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{
 					ID:      "0000000000000001-000",
 					Ledger:  10,
-					DataXDR: "AAAAB==",
+					DataXDR: ptrStr("AAAAB=="),
 					Topics:  json.RawMessage(`[{"old":true}]`),
 					Value:   json.RawMessage(`{"old":true}`),
 				},
@@ -132,7 +134,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{
 					ID:      "0000000000000002-000",
 					Ledger:  11,
-					DataXDR: "BBB==",
+					DataXDR: ptrStr("BBB=="),
 					Value:   val,
 				},
 			},
@@ -159,7 +161,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{
 					ID:      "0000000000000003-000",
 					Ledger:  12,
-					DataXDR: "CCC==",
+					DataXDR: ptrStr("CCC=="),
 					Value:   val,
 				},
 			},
@@ -186,7 +188,7 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 				{
 					ID:      "0000000000000004-000",
 					Ledger:  13,
-					DataXDR: "BAD==",
+					DataXDR: ptrStr("BAD=="),
 					Value:   json.RawMessage(`{}`),
 				},
 			},
@@ -204,8 +206,8 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		ctx := context.Background()
 		st := &MockStore{
 			Events: []store.DecodedEvent{
-				{ID: "1", Ledger: 20, DataXDR: "X1"},
-				{ID: "2", Ledger: 21, DataXDR: "X2"},
+				{ID: "1", Ledger: 20, DataXDR: ptrStr("X1")},
+				{ID: "2", Ledger: 21, DataXDR: ptrStr("X2")},
 			},
 		}
 		dec := &replayMockDecoder{
@@ -216,8 +218,6 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 
 		r := New(st, dec, slog.Default(), Options{FromLedger: 20, ToLedger: 21, BatchSize: 1})
 		_, err := r.Run(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, int64(21), st.ReplayState.LastLedger)
 		require.NoError(t, err)
 		assert.Equal(t, int64(21), st.ReplayState.LastLedger)
 	})
