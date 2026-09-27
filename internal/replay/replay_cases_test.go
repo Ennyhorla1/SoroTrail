@@ -2,9 +2,10 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 
-	"encoding/json"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,7 @@ func (d *mockDecoder) Decode(data []byte) ([]byte, error) {
 }
 
 type mockStore struct {
+	store.Store
 	ReplayState store.ReplayState
 	Events      []store.DecodedEvent
 	Batches     []store.ReplayBatch
@@ -31,10 +33,12 @@ type mockStore struct {
 	Locks       []*mockLock
 }
 
-type mockLock struct{}
+type mockLock struct {
+	releaseErr error
+}
 
 func (l *mockLock) Release() error {
-	return nil
+	return l.releaseErr
 }
 
 func (m *mockStore) GetReplayState(ctx context.Context) (store.ReplayState, error) {
@@ -84,7 +88,7 @@ func (m *mockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBat
 	return nil
 }
 
-func (m *mockStore) AcquireReplayLock(ctx context.Context, name string) (store.ReplayLock, error) {
+func (m *mockStore) AcquireReplayLock(ctx context.Context) (store.ReplayLock, error) {
 	if m.LockErr != nil {
 		return nil, m.LockErr
 	}
@@ -216,5 +220,14 @@ func TestReplay_BatchAndProgress(t *testing.T) {
 		require.NoError(t, err)
 		assert.EqualValues(t, 2, sum.Processed)
 		assert.EqualValues(t, 2, progressCalls)
+	})
+
+	t.Run("acquire lock failure", func(t *testing.T) {
+		ms := &mockStore{LockErr: errors.New("lock busy")}
+		dec := &replayMockDecoder{}
+		r := New(ms, dec, testLogger(), Options{FromLedger: 1, ToLedger: 100})
+		_, err := r.Run(context.Background())
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "lock busy")
 	})
 }
