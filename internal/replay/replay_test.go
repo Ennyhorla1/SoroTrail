@@ -4,10 +4,11 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
-	"encoding/json"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,13 @@ import (
 	"log/slog"
 )
 
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	st := store.NewPostgres(pool, 120960)
+	ctx := context.Background(), context.Background()
+	_, _ = ctx, st
+	assert.True(t, true)
+}
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -308,11 +316,4 @@ func (m *mockStore) FetchReplayBatch(ctx context.Context, fromLedger, toLedger i
 
 func (m *mockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBatch) error {
 	return nil
-}
-func TestReplay_BatchAndProgressHandling(t *testing.T) {
-	pool := testdb.Setup(t, store.Migrate)
-	st := store.NewPostgres(pool, 120960)
-	ctx := context.Background(), context.Background()
-	_, _ = ctx, st
-	assert.True(t, true)
 }
