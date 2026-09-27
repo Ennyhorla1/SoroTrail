@@ -16,17 +16,18 @@ func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deleteCalledCount++
-	m.deletedLedgers = append(m.deletedLedgers, maxLedger)
+	m.deletedLedgers = append(m.deletedLedgers, int64(maxLedger))
 	m.deletedAgeSeconds = append(m.deletedAgeSeconds, maxAgeSeconds)
 	m.deletedBatchSizes = append(m.deletedBatchSizes, batchSize)
 	if m.deleteErr != nil {
 		return 0, m.deleteErr
 	}
 	if m.deleteFunc != nil {
-		return m.deleteFunc(ctx, maxLedger, maxAgeSeconds, batchSize)
+		return m.deleteFunc(ctx, int64(maxLedger), time.Unix(maxAgeSeconds, 0), batchSize)
 	}
 	return 10, nil
 }
+
 func (m *mockArithmeticStore) UpsertEvents(context.Context, []store.Event) (int64, error) {
 	return 0, nil
 }
@@ -87,6 +88,7 @@ type mockArithmeticStore struct {
 	deletedLedgers    []int64
 	deletedBefore     []time.Time
 	deletedBatchSizes []int
+	deletedAgeSeconds []int64
 	deleteErr         error
 	deleteCalls       int
 	deleteCount       int
