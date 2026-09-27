@@ -1,3 +1,5 @@
+//go:build integration
+
 package replay
 
 import (
@@ -10,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/sorotrail/sorotrail/internal/store"
+	"github.com/sorotrail/sorotrail/internal/testdb"
 	"io"
 	"log/slog"
 )
