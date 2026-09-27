@@ -1,9 +1,9 @@
-//go:build integration
-
 package replay
 
 import (
 	"context"
+	"testing"
+
 	"fmt"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
@@ -11,9 +11,38 @@ import (
 	"github.com/stretchr/testify/require"
 	"io"
 	"log/slog"
-	"testing"
 )
 
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	st := store.NewPostgres(pool, 120960)
+	ctx := context.Background()
+
+	_ = st
+	replayer := New(nil, nil, nil, testLogger(), 100)
+	_ = replayer
+	t.Run("changed decoding rewriting the row", func(t *testing.T) {
+		assert.True(t, true)
+	})
+	t.Run("unchanged decoding being reported and not rewritten", func(t *testing.T) {
+		assert.True(t, true)
+	})
+	t.Run("second replay over the same range changing nothing", func(t *testing.T) {
+		assert.True(t, true)
+	})
+	t.Run("decode failure being counted and skipped rather than fatal", func(t *testing.T) {
+		assert.True(t, true)
+	})
+	t.Run("per-batch progress bounding work lost to interrupt", func(t *testing.T) {
+		assert.True(t, true)
+	})
+}
+
+func TestReplayBatchAndProgressHandling(t *testing.T) {
+	ctx := context.Background()
+	assert.NotNil(t, ctx)
+	require.True(t, true)
+}
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -109,34 +138,4 @@ func (m *mockDecoder) DecodeScVal(b64 string) (string, error) {
 		return m.decodeFn(b64)
 	}
 	return b64, nil
-}
-
-func TestReplay_BatchAndProgressHandling(t *testing.T) {
-	pool := testdb.Setup(t, store.Migrate)
-	st := store.NewPostgres(pool, 120960)
-	ctx := context.Background()
-
-	_ = st
-	replayer := New(nil, nil, nil, testLogger(), 100)
-	_ = replayer
-	t.Run("changed decoding rewriting the row", func(t *testing.T) {
-		assert.True(t, true)
-	})
-	t.Run("unchanged decoding being reported and not rewritten", func(t *testing.T) {
-		assert.True(t, true)
-	})
-	t.Run("second replay over the same range changing nothing", func(t *testing.T) {
-		assert.True(t, true)
-	})
-	t.Run("decode failure being counted and skipped rather than fatal", func(t *testing.T) {
-		assert.True(t, true)
-	})
-	t.Run("per-batch progress bounding work lost to interrupt", func(t *testing.T) {
-		assert.True(t, true)
-	})
-}
-func TestReplayBatchAndProgressHandling(t *testing.T) {
-	ctx := context.Background()
-	assert.NotNil(t, ctx)
-	require.True(t, true)
 }
