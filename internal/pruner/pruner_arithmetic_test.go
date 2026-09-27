@@ -27,6 +27,7 @@ func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uin
 	}
 	return 10, nil
 }
+
 func (m *mockArithmeticStore) UpsertEvents(context.Context, []store.Event) (int64, error) {
 	return 0, nil
 }
@@ -173,19 +174,19 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 		}{
 			{
 				name:           "ledger only",
-				opts:           Options{MinLedger: 500, BatchSize: 50, Enabled: true},
+				opts:           Options{MinLedger: 500, BatchSize: 50},
 				expectedLedger: 500,
 				hasAge:         false,
 			},
 			{
 				name:           "age only",
-				opts:           Options{MaxAge: 3600 * time.Second, BatchSize: 50, Enabled: true},
+				opts:           Options{MaxAge: 3600 * time.Second, BatchSize: 50},
 				expectedLedger: 2000,
 				hasAge:         true,
 			},
 			{
 				name:           "both combined",
-				opts:           Options{MinLedger: 500, MaxAge: 3600 * time.Second, BatchSize: 50, Enabled: true},
+				opts:           Options{MinLedger: 500, MaxAge: 3600 * time.Second, BatchSize: 50},
 				expectedLedger: 500,
 				hasAge:         true,
 			},
@@ -220,7 +221,7 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 			},
 		}
 
-		p := New(st, nil, Options{MinLedger: 1000, BatchSize: 42, Enabled: true})
+		p := New(st, nil, Options{MinLedger: 1000, BatchSize: 42})
 		err := p.Run(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 3, st.deleteCalledCount)
@@ -239,7 +240,7 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 			},
 		}
 
-		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10, Enabled: true})
+		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10})
 		count, err := p.pruneOnce(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, int64(15), count)
@@ -255,7 +256,7 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 			},
 		}
 
-		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10, Enabled: true})
+		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10})
 		err := p.Run(context.Background())
 		assert.Error(t, err)
 		assert.True(t, st.unlockCalled)
