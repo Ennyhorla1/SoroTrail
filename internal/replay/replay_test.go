@@ -6,13 +6,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"encoding/json"
 	"fmt"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"log/slog"
 )
