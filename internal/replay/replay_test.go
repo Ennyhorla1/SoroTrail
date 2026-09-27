@@ -15,6 +15,9 @@ import (
 	"log/slog"
 )
 
+func (m *mockStore) FetchReplayBatch(ctx context.Context, fromLedger, toLedger int64, batchSize int) ([]store.ReplayBatch, error) {
+	return m.batches, nil
+}
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -281,10 +284,6 @@ func TestJSONEqual(t *testing.T) {
 			assert.Equal(t, tt.want, jsonEqual(json.RawMessage(tt.a), json.RawMessage(tt.b)))
 		})
 	}
-}
-
-func (m *mockStore) FetchReplayBatch(ctx context.Context, fromLedger, toLedger int64, batchSize int) ([]store.ReplayBatch, error) {
-	return m.batches, nil
 }
 
 func TestReplay_Placeholder(t *testing.T) {
