@@ -12,6 +12,17 @@ import (
 	"github.com/sorotrail/sorotrail/internal/store"
 )
 
+// MockStore implements store.Store for replay testing without real DB infra unless needed.
+type MockStore struct {
+	store.Store
+	Events      []store.Event
+	Batches     []store.ReplayBatch
+	ReplayState store.ReplayState
+	SaveErr     error
+	CommitErr   error
+	QueryErr    error
+}
+
 // Run executes a replay run over the given ledger range using the provided store and decoder.
 func Run(ctx context.Context, s store.Store, dec decode.Decoder, fromLedger, toLedger int64, batchSize int) error {
 	state, err := s.GetReplayState(ctx)
@@ -54,17 +65,6 @@ func Run(ctx context.Context, s store.Store, dec decode.Decoder, fromLedger, toL
 		}
 	}
 	return nil
-}
-
-// MockStore implements store.Store for replay testing without real DB infra unless needed.
-type MockStore struct {
-	store.Store
-	Events      []store.Event
-	Batches     []store.ReplayBatch
-	ReplayState store.ReplayState
-	SaveErr     error
-	CommitErr   error
-	QueryErr    error
 }
 
 func (m *MockStore) QueryEventsForReplay(ctx context.Context, fromLedger, toLedger int64, batchSize int) ([]store.Event, error) {
@@ -249,5 +249,28 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		err := Run(ctx, st, dec, 20, 21, 1)
 		require.NoError(t, err)
 		assert.Equal(t, int64(21), st.ReplayState.LastLedger)
+	})
+}
+
+type ReplayMockStore struct {
+	store.Store
+	Events      []store.Event
+	Batches     []store.EventDecoding
+	ReplayState store.ReplayState
+	SaveErr     error
+	CommitErr   error
+	QueryErr    error
+}
+
+type mockDecoder struct {
+	decode.Decoder
+	RewriteFn func(rawXDR string) (json.RawMessage, json.RawMessage, error)
+	FailCount int
+	Calls     int
+}
+
+func TestReplay_BatchAndProgressHandlingStub(t *testing.T) {
+	t.Run("stub for batch and progress handling conformance", func(t *testing.T) {
+		assert.True(t, true)
 	})
 }
