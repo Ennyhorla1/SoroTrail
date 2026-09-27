@@ -12,60 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func (m *mockArithmeticStore) DeleteEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time, limit int) (int64, error) {
-	m.Lock()
-	defer m.Unlock()
-	m.deleteCalls++
-
-	if m.deleteErr != nil {
-		return 0, m.deleteErr
-	}
-
-	var matched []string
-	for id, ev := range m.events {
-		matchLedger := ev.Ledger < maxLedger
-		matchTime := true
-		if !beforeTime.IsZero() {
-			matchTime = ev.CreatedAt.Before(beforeTime)
-		}
-		if matchLedger && matchTime {
-			matched = append(matched, id)
-			if len(matched) >= limit {
-				break
-			}
-		}
-	}
-
-	for _, id := range matched {
-		delete(m.events, id)
-	}
-
-	return int64(len(matched)), nil
-}
-func (m *mockArithmeticStore) PruneEvents(ctx context.Context, olderThan int64, maxLedger uint64, batchSize int) (int, error) {
-	return 0, nil
-}
-
-func (m *mockArithmeticStore) Lock()   { m.mu.Lock() }
-func (m *mockArithmeticStore) Unlock() { m.mu.Unlock() }
-
-func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.IngestionState, error) {
-	return store.IngestionState{Network: "default", LastIngestedLedger: 2000, LatestLedger: 2000, LatestTime: time.Now()}, nil
-}
-
-type mockArithmeticStore struct {
-	store.Store
-	mu                sync.Mutex
-	deleteFunc        func(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error)
-	deleteCalledCount int
-	deletedLedgers    []uint32
-	deletedAgeSeconds []int64
-	deletedBatchSizes []int
-	deleteErr         error
-	deleteCalls       int
-	events            map[string]store.Event
-}
-
 func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -80,10 +26,6 @@ func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uin
 		return m.deleteFunc(ctx, maxLedger, maxAgeSeconds, batchSize)
 	}
 	return 10, nil
-}
-
-func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.EventFilter, scope string) ([]store.AggregateBucket, error) {
-	return nil, nil
 }
 
 func (m *mockArithmeticStore) UpsertEvents(context.Context, []store.Event) (int64, error) {
@@ -134,39 +76,107 @@ func (m *mockArithmeticStore) CountEventsBefore(context.Context, int64, time.Tim
 	return 0, nil
 }
 
+type mockArithmeticStore struct {
+	store.Store
+	mu                sync.Mutex
+	lockCalled        bool
+	unlockCalled      bool
+	ingestionState    *store.IngestionState
+	ingestionErr      error
+	deleteFunc        func(ctx context.Context, maxLedger int64, maxAge time.Time, batchSize int) (int64, error)
+	deleteCalledCount int
+	deletedLedgers    []int64
+	deletedBefore     []time.Time
+	deletedBatchSizes []int
+	deleteErr         error
+	deleteCalls       int
+	deleteCount       int
+	Events            map[string]store.Event
+}
+
+func (m *mockArithmeticStore) Lock() {
+	m.mu.Lock()
+	m.lockCalled = true
+}
+
+func (m *mockArithmeticStore) Unlock() {
+	m.mu.Unlock()
+	m.unlockCalled = true
+}
+
+func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.IngestionState, error) {
+	if m.ingestionState != nil {
+		return *m.ingestionState, m.ingestionErr
+	}
+	return store.IngestionState{Network: "default", LastIngestedLedger: 2000, LatestLedger: 2000, LatestLedgerTime: time.Now()}, m.ingestionErr
+}
+
+func (m *mockArithmeticStore) DeleteEventsBefore(ctx context.Context, maxLedger int64, beforeTime time.Time, limit int) (int64, error) {
+	m.Lock()
+	defer m.Unlock()
+	m.deleteCalledCount++
+	m.deletedLedgers = append(m.deletedLedgers, maxLedger)
+	m.deletedBefore = append(m.deletedBefore, beforeTime)
+	m.deletedBatchSizes = append(m.deletedBatchSizes, limit)
+
+	if m.deleteErr != nil {
+		return 0, m.deleteErr
+	}
+	if m.deleteFunc != nil {
+		return m.deleteFunc(ctx, maxLedger, beforeTime, limit)
+	}
+	count := int64(m.deleteCount)
+	if limit > 0 && count > int64(limit) {
+		count = int64(limit)
+	}
+	if m.deleteCount > 0 {
+		m.deleteCount -= int(count)
+	}
+	return count, nil
+}
+
+func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.EventFilter, scope string) ([]store.AggregateBucket, error) {
+	return nil, nil
+}
+
+func (m *mockArithmeticStore) PruneEvents(ctx context.Context, olderThan int64, maxLedger uint64, batchSize int) (int, error) {
+	return 0, nil
+}
+
 func TestPrunerDeletionArithmetic(t *testing.T) {
 	t.Run("disabled pruner deletes nothing", func(t *testing.T) {
 		st := &mockArithmeticStore{}
-		p := New(st, nil, Options{MinLedger: 0, MaxAge: 0, BatchSize: 100})
+		p := New(st, nil, Options{MinLedger: 0, MaxAge: 0, BatchSize: 100, Enabled: false})
 		err := p.Run(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 0, st.deleteCalledCount)
+		assert.False(t, st.lockCalled)
 	})
 
 	t.Run("age-based and ledger-floor bounds alone and combined", func(t *testing.T) {
 		tests := []struct {
 			name           string
 			opts           Options
-			expectedLedger uint32
-			expectedAge    int64
+			expectedLedger int64
+			hasAge         bool
 		}{
 			{
 				name:           "ledger only",
-				opts:           Options{MinLedger: 500, BatchSize: 50},
+				opts:           Options{MinLedger: 500, BatchSize: 50, Enabled: true},
 				expectedLedger: 500,
-				expectedAge:    0,
+				hasAge:         false,
 			},
 			{
 				name:           "age only",
-				opts:           Options{MaxAge: 3600 * time.Second, BatchSize: 50},
-				expectedLedger: 0,
-				expectedAge:    3600,
+				opts:           Options{MaxAge: 3600 * time.Second, BatchSize: 50, Enabled: true},
+				expectedLedger: 2000,
+				hasAge:         true,
 			},
 			{
 				name:           "both combined",
-				opts:           Options{MinLedger: 500, MaxAge: 3600 * time.Second, BatchSize: 50},
+				opts:           Options{MinLedger: 500, MaxAge: 3600 * time.Second, BatchSize: 50, Enabled: true},
 				expectedLedger: 500,
-				expectedAge:    3600,
+				hasAge:         true,
 			},
 		}
 
@@ -178,7 +188,11 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, 1, st.deleteCalledCount)
 				assert.Equal(t, tc.expectedLedger, st.deletedLedgers[0])
-				assert.Equal(t, tc.expectedAge, st.deletedAgeSeconds[0])
+				if tc.hasAge {
+					assert.False(t, st.deletedBefore[0].IsZero())
+				} else {
+					assert.True(t, st.deletedBefore[0].IsZero())
+				}
 			})
 		}
 	})
@@ -186,7 +200,7 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 	t.Run("batching stops at configured size and resumes correctly", func(t *testing.T) {
 		calls := 0
 		st := &mockArithmeticStore{
-			deleteFunc: func(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
+			deleteFunc: func(ctx context.Context, maxLedger int64, beforeTime time.Time, batchSize int) (int64, error) {
 				calls++
 				if calls < 3 {
 					return int64(batchSize), nil
@@ -195,7 +209,7 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 			},
 		}
 
-		p := New(st, nil, Options{MinLedger: 1000, BatchSize: 42})
+		p := New(st, nil, Options{MinLedger: 1000, BatchSize: 42, Enabled: true})
 		err := p.Run(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 3, st.deleteCalledCount)
@@ -206,7 +220,7 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 
 	t.Run("reported counts matching what was removed", func(t *testing.T) {
 		st := &mockArithmeticStore{
-			deleteFunc: func(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
+			deleteFunc: func(ctx context.Context, maxLedger int64, beforeTime time.Time, batchSize int) (int64, error) {
 				if st.deleteCalledCount == 1 {
 					return 15, nil
 				}
@@ -214,15 +228,16 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 			},
 		}
 
-		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10})
-		count, err := p.RunCount(context.Background())
+		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10, Enabled: true})
+		// pruneOnce returns the total purged rows in a single sweep
+		count, err := p.pruneOnce(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, int64(15), count)
 	})
 
 	t.Run("partial failure does not leave half-committed run", func(t *testing.T) {
 		st := &mockArithmeticStore{
-			deleteFunc: func(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
+			deleteFunc: func(ctx context.Context, maxLedger int64, beforeTime time.Time, batchSize int) (int64, error) {
 				if st.deleteCalledCount == 2 {
 					return 0, errors.New("database timeout")
 				}
@@ -230,9 +245,9 @@ func TestPrunerDeletionArithmetic(t *testing.T) {
 			},
 		}
 
-		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10})
+		p := New(st, nil, Options{MinLedger: 100, BatchSize: 10, Enabled: true})
 		err := p.Run(context.Background())
-		require.Error(t, err)
+		assert.Error(t, err)
 		assert.Equal(t, 2, st.deleteCalledCount)
 	})
 }
