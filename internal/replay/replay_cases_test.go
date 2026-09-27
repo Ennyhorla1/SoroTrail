@@ -37,7 +37,7 @@ type mockLock struct {
 	releaseErr error
 }
 
-func (l *mockLock) Release() error {
+func (l *mockLock) Release(ctx context.Context) error {
 	return l.releaseErr
 }
 
