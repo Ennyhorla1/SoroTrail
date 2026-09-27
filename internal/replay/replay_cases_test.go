@@ -148,7 +148,11 @@ func TestReplayLockInterface(t *testing.T) {
 
 func TestReplayBatchAndProgressHandling(t *testing.T) {
 	var processed int64
-	r := New(newFakeStore(seedEvent(1, 100), seedEvent(2, 101)), improvedDecoder(), testLogger(), Options{
+	ev1 := seedEvent(1, 100)
+	ev2 := seedEvent(2, 101)
+	ms := newFakeStore(ev1, ev2)
+	dec := improvedDecoder()
+	r := New(ms, dec, testLogger(), Options{
 		FromLedger: 1,
 		ToLedger:   1000,
 		BatchSize:  1,
