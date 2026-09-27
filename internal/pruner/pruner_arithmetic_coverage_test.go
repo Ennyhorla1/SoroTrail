@@ -11,6 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+
+func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint32, t time.Time, limit int) (int64, error) {
+	if m.deleteErr != nil {
+		return 0, m.deleteErr
+	}
+	return m.deleteCount, nil
+}
 type Config struct {
 	Enabled         bool
 	MaxAge          time.Duration
@@ -18,11 +25,11 @@ type Config struct {
 	BatchSize       int
 }
 
-func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint32, t time.Time, limit int) (int64, error) {
+func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger int64, t time.Time) (int64, error) {
 	if m.deleteErr != nil {
 		return 0, m.deleteErr
 	}
-	return m.deleteCount, nil
+	return int64(m.deleteCount), nil
 }
 func TestPrunerArithmeticCoverage_Disabled(t *testing.T) {
 	ctx := context.Background()
