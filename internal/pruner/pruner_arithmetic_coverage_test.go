@@ -18,11 +18,44 @@ type Config struct {
 	RetainedLedgers uint32
 	BatchSize       int
 }
+type mockArithmeticStore struct {
+	store.Store
+	ingestionState *store.IngestionState
+	lockCalled     bool
+	unlockCalled   bool
+	deleteCount    int64
+	deleteErr      error
+}
+
+func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (*store.IngestionState, error) {
+	return m.ingestionState, nil
+}
+
+func (m *mockArithmeticStore) LockPruner(ctx context.Context) (bool, error) {
+	m.lockCalled = true
+	return true, nil
+}
+
+func (m *mockArithmeticStore) UnlockPruner(ctx context.Context) error {
+	m.unlockCalled = true
+	return nil
+}
+
+func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger uint32, t time.Time) (int64, error) {
+	return m.deleteCount, m.deleteErr
+}
+
+func (m *mockArithmeticStore) PruneEventsBefore(ctx context.Context, ledger uint32, t time.Time, limit int) (int64, error) {
+	if m.deleteErr != nil {
+		return 0, m.deleteErr
+	}
+	return m.deleteCount, nil
+}
 
 func TestPrunerArithmeticCoverage_Disabled(t *testing.T) {
 	ctx := context.Background()
 	st := &mockArithmeticStore{
-		ingestionState: &store.IngestionState{LastIngestedLedger: 1000, LatestLedger: 1000},
+		ingestionState: &store.IngestionState{LastIngestedLedger: 1000},
 	}
 
 	p := New(st, slog.Default(), Options{
@@ -51,8 +84,6 @@ func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 			},
 			ingestionState: &store.IngestionState{
 				LastIngestedLedger: 100,
-				LatestLedger:       100,
-				LatestLedgerTime:   now,
 			},
 		},
 		{
@@ -63,8 +94,6 @@ func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 			},
 			ingestionState: &store.IngestionState{
 				LastIngestedLedger: 100,
-				LatestLedger:       100,
-				LatestLedgerTime:   now,
 			},
 		},
 	}
@@ -87,7 +116,7 @@ func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
 func TestPrunerArithmeticCoverage_BatchingAndCounts(t *testing.T) {
 	ctx := context.Background()
 	st := &mockArithmeticStore{
-		ingestionState: &store.IngestionState{LastIngestedLedger: 500, LatestLedger: 500, LatestLedgerTime: time.Now()},
+		ingestionState: &store.IngestionState{LastIngestedLedger: 500},
 		deleteCount:    25,
 	}
 
@@ -104,7 +133,7 @@ func TestPrunerArithmeticCoverage_BatchingAndCounts(t *testing.T) {
 func TestPrunerArithmeticCoverage_PartialFailure(t *testing.T) {
 	ctx := context.Background()
 	st := &mockArithmeticStore{
-		ingestionState: &store.IngestionState{LastIngestedLedger: 500, LatestLedger: 500, LatestLedgerTime: time.Now()},
+		ingestionState: &store.IngestionState{LastIngestedLedger: 500},
 		deleteErr:      assert.AnError,
 	}
 
