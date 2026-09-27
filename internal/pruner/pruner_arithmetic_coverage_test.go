@@ -30,6 +30,10 @@ func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.Inge
 	return store.IngestionState{Network: "default", LastIngestedLedger: 2000}, nil
 }
 
+func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, f store.EventFilter, scope store.Scope) ([]any, error) {
+	return nil, nil
+}
+
 func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -43,7 +47,7 @@ func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uin
 	return 10, nil
 }
 
-func TestPrunerDeletionArithmetic(t *testing.T) {
+func TestPrunerDeletionArithmeticCoverage(t *testing.T) {
 	logger := slog.Default()
 
 	t.Run("disabled pruner deletes nothing", func(t *testing.T) {
