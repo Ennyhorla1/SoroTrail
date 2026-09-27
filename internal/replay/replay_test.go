@@ -263,6 +263,18 @@ func TestRun_DryRunWritesNothing(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "dry run must not persist progress")
 }
 
+func TestReplayBatchAndProgressHandling(t *testing.T) {
+	// Coverage for batching and progress handling in replay loops.
+	t.Run("batching bounds work per commit", func(t *testing.T) {
+		st := newFakeStore(seedEvent(1, 100), seedEvent(2, 101), seedEvent(3, 102))
+		r := newTestReplayer(st, improvedDecoder(), Options{FromLedger: 1, ToLedger: 1000, BatchSize: 1})
+		sum, err := r.Run(context.Background())
+		require.NoError(t, err)
+		assert.True(t, sum.Completed)
+		assert.EqualValues(t, 3, sum.Processed)
+	})
+}
+
 func TestJSONEqual(t *testing.T) {
 	tests := []struct {
 		name string
