@@ -3,6 +3,7 @@ package pruner
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/sorotrail/sorotrail/internal/store"
@@ -10,6 +11,23 @@ import (
 	"github.com/stretchr/testify/require"
 	"time"
 )
+
+type mockArithmeticStore struct {
+	store.Store
+	mu             sync.Mutex
+	prunedCount    int
+	pruneErr       error
+	deleteErr      error
+	deleteCalls    int
+	lastBatchSize  int
+	lastMaxLedger  uint64
+	lastOlderThan  int64
+	ingestedLedger int64
+	events         map[string]store.Event
+}
+
+func (m *mockArithmeticStore) Lock()   { m.mu.Lock() }
+func (m *mockArithmeticStore) Unlock() { m.mu.Unlock() }
 
 func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.IngestionState, error) {
 	m.Lock()
@@ -101,17 +119,6 @@ func (m *mockArithmeticStore) CountContracts(context.Context, store.ContractsFil
 
 func (m *mockArithmeticStore) CountEventsBefore(context.Context, int64, time.Time) (int64, error) {
 	return 0, nil
-}
-
-type mockArithmeticStore struct {
-	store.Store
-	prunedCount   int
-	pruneErr      error
-	lastBatchSize int
-	lastMaxLedger uint64
-	lastOlderThan int64
-	ledgers       []uint64
-	ages          []int64
 }
 
 func (m *mockArithmeticStore) PruneEvents(ctx context.Context, olderThan int64, maxLedger uint64, batchSize int) (int, error) {
