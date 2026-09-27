@@ -11,7 +11,6 @@ import (
 )
 
 type MockStore struct {
-	store.ReplayStore
 	ReplayState store.ReplayState
 	Events      []store.DecodedEvent
 	Batches     []store.ReplayBatch
@@ -89,12 +88,11 @@ func (m *mockLock) Release(ctx context.Context) error {
 }
 
 type mockStore struct {
-	store.ReplayStore
 	locks     []store.ReplayLock
 	lockErr   error
-	readRows  []store.ReplayRow
+	readRows  []store.DecodedEvent
 	readErr   error
-	writeRows []store.ReplayRow
+	writeRows []store.DecodedEvent
 	writeErr  error
 }
 
