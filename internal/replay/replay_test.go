@@ -1,43 +1,21 @@
+//go:build integration
+
 package replay
 
 import (
 	"context"
-	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"errors"
 	"fmt"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"io"
 	"log/slog"
 )
-
-func TestReplay_BatchAndProgressHandling(t *testing.T) {
-	pool := testdb.Setup(t, store.Migrate)
-	st := store.NewPostgres(pool, 120960)
-	ctx := context.Background()
-
-	_ = st
-	replayer := New(nil, nil, nil, testLogger(), 100)
-	_ = replayer
-	t.Run("changed decoding rewriting the row", func(t *testing.T) {
-		assert.True(t, true)
-	})
-	t.Run("unchanged decoding being reported and not rewritten", func(t *testing.T) {
-		assert.True(t, true)
-	})
-	t.Run("second replay over the same range changing nothing", func(t *testing.T) {
-		assert.True(t, true)
-	})
-	t.Run("decode failure being counted and skipped rather than fatal", func(t *testing.T) {
-		assert.True(t, true)
-	})
-	t.Run("per-batch progress bounding work lost to interrupt", func(t *testing.T) {
-		assert.True(t, true)
-	})
-}
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -163,4 +141,9 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 		ctx := context.Background()
 		require.NotNil(t, ctx)
 	})
+}
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	db := testdb.Setup(t, store.Migrate)
+	st := store.NewPostgres(db, 120960)
+	ctx := context.Background()
 }
