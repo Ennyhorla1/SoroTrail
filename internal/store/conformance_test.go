@@ -120,6 +120,7 @@ func TestStoreConformance(t *testing.T) {
 // runStoreTests runs the conformance suite against one backend. A backend
 // with a required server is skipped as a whole when its URL is unset, and any
 // operation it declares unsupported is skipped per test with that declaration.
+
 // RunStoreConformanceSuite runs a standard set of error semantic and behavior
 // assertions against any Store implementation to guarantee that backends agree
 // on ErrNotFound, empty collections, and error handling.
@@ -145,16 +146,6 @@ func RunStoreConformanceSuite(t *testing.T, st Store) {
 	t.Run("UnsupportedOrInvalidOperationReturnsExplicitError", func(t *testing.T) {
 		err := st.AddWatchedContract(ctx, "")
 		assert.Error(t, err)
-	})
-}
-
-// RunStoreConformanceSuite runs a standard set of error semantic and behavior
-// assertions against any Store implementation to guarantee that backends agree
-// on ErrNotFound, empty collections, and error handling.
-func RunStoreConformanceSuite(t *testing.T, st Store) {
-	runStoreTests(t, conformanceBackend{
-		name:    "custom",
-		factory: func(t *testing.T) Store { return st },
 	})
 }
 
