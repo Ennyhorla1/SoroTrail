@@ -42,6 +42,16 @@ func (m *mockArithmeticStore) DeleteEventsBefore(ctx context.Context, maxLedger 
 
 	return int64(len(matched)), nil
 }
+func (m *mockArithmeticStore) PruneEvents(ctx context.Context, olderThan int64, maxLedger uint64, batchSize int) (int, error) {
+	return 0, nil
+}
+
+func (m *mockArithmeticStore) Lock()   { m.mu.Lock() }
+func (m *mockArithmeticStore) Unlock() { m.mu.Unlock() }
+
+func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.IngestionState, error) {
+	return store.IngestionState{Network: "default", LastIngestedLedger: 2000, LatestLedger: 2000, LatestTime: time.Now()}, nil
+}
 
 type mockArithmeticStore struct {
 	store.Store
@@ -52,13 +62,8 @@ type mockArithmeticStore struct {
 	deletedAgeSeconds []int64
 	deletedBatchSizes []int
 	deleteErr         error
-}
-
-func (m *mockArithmeticStore) Lock()   { m.mu.Lock() }
-func (m *mockArithmeticStore) Unlock() { m.mu.Unlock() }
-
-func (m *mockArithmeticStore) GetIngestionState(ctx context.Context) (store.IngestionState, error) {
-	return store.IngestionState{Network: "default", LastIngestedLedger: 2000, LatestLedger: 2000, LatestTime: time.Now()}, nil
+	deleteCalls       int
+	events            map[string]store.Event
 }
 
 func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uint32, maxAgeSeconds int64, batchSize int) (int64, error) {
@@ -77,11 +82,7 @@ func (m *mockArithmeticStore) DeleteOldEvents(ctx context.Context, maxLedger uin
 	return 10, nil
 }
 
-func (m *mockArithmeticStore) PruneEvents(ctx context.Context, olderThan int64, maxLedger uint64, batchSize int) (int, error) {
-	return 0, nil
-}
-
-func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.EventFilter, scope store.Scope) ([]any, error) {
+func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.EventFilter, scope string) ([]store.AggregateBucket, error) {
 	return nil, nil
 }
 
