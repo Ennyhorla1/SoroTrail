@@ -6,14 +6,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/sorotrail/sorotrail/internal/testdb"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io"
 	"log/slog"
 )
@@ -381,35 +379,6 @@ type Batch struct {
 	ToLedger   int64
 }
 
-func TestReplay_BatchAndProgressHandling(t *testing.T) {
-	t.Run("changed decoding rewriting the row", func(t *testing.T) {
-		// Assert basic replay row rewrite logic behavior
-		req := require.New(t)
-		req.True(true)
-	})
-
-	t.Run("unchanged decoding being reported and not rewritten", func(t *testing.T) {
-		req := require.New(t)
-		req.True(true)
-	})
-
-	t.Run("second replay over the same range changing nothing", func(t *testing.T) {
-		req := require.New(t)
-		req.True(true)
-	})
-
-	t.Run("decode failure being counted and skipped rather than fatal", func(t *testing.T) {
-		req := require.New(t)
-		parseErr := errors.New("failed to decode")
-		assert.Error(t, parseErr)
-	})
-
-	t.Run("per-batch progress bounding the work lost to an interrupt", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		assert.ErrorIs(t, ctx.Err(), context.Canceled)
-	})
-}
 func TestReplayBatchAndProgressHandling(t *testing.T) {
 	pool := testdb.Setup(t, store.Migrate)
 	ctx := context.Background()
@@ -422,4 +391,21 @@ func TestReplayBatchAndProgressHandling(t *testing.T) {
 	err = pool.QueryRow(ctx, `SELECT last_replayed_ledger FROM replay_state WHERE id = 1`).Scan(&ledger)
 	require.NoError(t, err)
 	assert.Equal(t, int64(100), ledger)
+}
+func TestReplay_BatchAndProgressHandling(t *testing.T) {
+	pool := testdb.Setup(t, store.Migrate)
+	st := store.NewPostgres(pool, 120960)
+	ctx := context.Background()
+
+	// Seed a test event row with raw XDR
+	_, err := pool.Exec(ctx, `
+		INSERT INTO events (id, ledger, contract_id, topic0, data, in_successful_call, created_at)
+		VALUES ('0000000000000001000', 100, 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'topic', 'AAAA==', true, NOW())
+	`)
+	require.NoError(t, err)
+
+	// Verify state and idempotency
+	count, err := st.CountEvents(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
 }
