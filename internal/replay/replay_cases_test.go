@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,21 +13,11 @@ import (
 	"github.com/sorotrail/sorotrail/internal/store"
 )
 
-func (md *replayMockDecoder) DecodeEventXDRLegacy(rawXDR string) (json.RawMessage, json.RawMessage, error) {
-	md.Calls++
-	if md.FailCount > 0 && md.Calls <= md.FailCount {
-		return nil, nil, assert.AnError
-	}
-	if md.RewriteFn != nil {
-		return md.RewriteFn(rawXDR)
-	}
-	return json.RawMessage(`[]`), json.RawMessage(`{}`), nil
-}
+// mock decoder helper functions
 
-// MockStore implements store.Store for replay testing.
+// MockStore implements Store for testing.
 type MockStore struct {
-	store.Store
-	Events      []store.Event
+	Events      []store.DecodedEvent
 	Batches     []store.ReplayBatch
 	ReplayState store.ReplayState
 	SaveErr     error
@@ -34,74 +25,40 @@ type MockStore struct {
 	QueryErr    error
 }
 
-func Run(ctx context.Context, s store.Store, dec decode.Decoder, fromLedger, toLedger int64, batchSize int) error {
-	state, err := s.GetReplayState(ctx)
-	if err != nil {
-		return err
-	}
-	if state.LastLedger < fromLedger {
-		state.LastLedger = fromLedger
-	}
-	for curr := state.LastLedger; curr <= toLedger; curr += int64(batchSize) {
-		endBatch := curr + int64(batchSize) - 1
-		if endBatch > toLedger {
-			endBatch = toLedger
-		}
-		Events, err := s.QueryEventsForReplay(ctx, curr, endBatch, batchSize)
-		if err != nil {
-			return err
-		}
-		var decodedEvents []store.EventDecoding
-		for _, ev := range Events {
-			topics, value, err := dec.DecodeScVal(ev.TopicsXDR)
-			if err != nil {
-				continue
-			}
-			decodedEvents = append(decodedEvents, store.EventDecoding{
-				ID:     ev.ID,
-				Topics: topics,
-				Value:  value,
-			})
-		}
-		err = s.CommitReplayBatch(ctx, store.ReplayBatch{
-			StartLedger: curr,
-			EndLedger:   endBatch,
-			Events:      decodedEvents,
-		})
-		if err != nil {
-			return err
-		}
-		state.LastLedger = endBatch
-		if err := s.SaveReplayState(ctx, state); err != nil {
-			return err
-		}
-	}
-	return nil
+func (m *MockStore) AcquireReplayLock(ctx context.Context) (store.ReplayLock, error) {
+	return &mockLock{}, nil
 }
 
-func (m *MockStore) QueryEventsForReplay(ctx context.Context, fromLedger, toLedger int64, batchSize int) ([]store.Event, error) {
-	if m.QueryErr != nil {
-		return nil, m.QueryErr
-	}
-	var res []store.Event
-	for _, ev := range m.Events {
-		if ev.Ledger >= fromLedger && ev.Ledger <= toLedger {
-			res = append(res, ev)
-		}
-	}
-	return res, nil
+type mockLock struct{}
+
+func (l *mockLock) Release() error {
+	return nil
 }
 
 func (m *MockStore) GetReplayState(ctx context.Context) (store.ReplayState, error) {
 	return m.ReplayState, nil
 }
 
-func (m *MockStore) SaveReplayState(ctx context.Context, s store.ReplayState) error {
-	if m.SaveErr != nil {
-		return m.SaveErr
-	}
-	m.ReplayState = s
+func (m *MockStore) StartReplayState(ctx context.Context, fromLedger, toLedger int64) error {
 	return nil
+}
+
+func (m *MockStore) NextReplayBatch(ctx context.Context, fromLedger, toLedger int64, afterID string, limit int) ([]store.DecodedEvent, error) {
+	if m.QueryErr != nil {
+		return nil, m.QueryErr
+	}
+	var res []store.DecodedEvent
+	for _, ev := range m.Events {
+		if ev.Ledger >= fromLedger && ev.Ledger <= toLedger {
+			if afterID == "" || ev.ID > afterID {
+				res = append(res, ev)
+				if len(res) >= limit {
+					break
+				}
+			}
+		}
+	}
+	return res, nil
 }
 
 func (m *MockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBatch) error {
@@ -117,6 +74,7 @@ func (m *MockStore) CommitReplayBatch(ctx context.Context, batch store.ReplayBat
 			}
 		}
 	}
+	m.ReplayState.LastLedger = batch.ToLedger
 	return nil
 }
 
@@ -142,13 +100,13 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 	t.Run("changed decoding rewriting the row", func(t *testing.T) {
 		ctx := context.Background()
 		st := &MockStore{
-			Events: []store.Event{
+			Events: []store.DecodedEvent{
 				{
-					ID:        "0000000000000001-000",
-					Ledger:    10,
-					TopicsXDR: "AAAAB==",
-					Topics:    json.RawMessage(`[{"old":true}]`),
-					Value:     json.RawMessage(`{"old":true}`),
+					ID:      "0000000000000001-000",
+					Ledger:  10,
+					DataXDR: "AAAAB==",
+					Topics:  json.RawMessage(`[{"old":true}]`),
+					Value:   json.RawMessage(`{"old":true}`),
 				},
 			},
 		}
@@ -158,7 +116,8 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 			},
 		}
 
-		err := Run(ctx, st, dec, 10, 10, 100)
+		r := New(st, dec, slog.Default(), Options{FromLedger: 10, ToLedger: 10, BatchSize: 100})
+		_, err := r.Run(ctx)
 		require.NoError(t, err)
 		require.Len(t, st.Batches, 1)
 		require.Len(t, st.Batches[0].Events, 1)
@@ -169,12 +128,12 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		ctx := context.Background()
 		val := json.RawMessage(`{"same":true}`)
 		st := &MockStore{
-			Events: []store.Event{
+			Events: []store.DecodedEvent{
 				{
-					ID:        "0000000000000002-000",
-					Ledger:    11,
-					TopicsXDR: "BBB==",
-					Value:     val,
+					ID:      "0000000000000002-000",
+					Ledger:  11,
+					DataXDR: "BBB==",
+					Value:   val,
 				},
 			},
 		}
@@ -184,7 +143,8 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 			},
 		}
 
-		err := Run(ctx, st, dec, 11, 11, 100)
+		r := New(st, dec, slog.Default(), Options{FromLedger: 11, ToLedger: 11, BatchSize: 100})
+		_, err := r.Run(ctx)
 		require.NoError(t, err)
 		if len(st.Batches) > 0 {
 			assert.Len(t, st.Batches[0].Events, 1)
@@ -195,12 +155,12 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 		ctx := context.Background()
 		val := json.RawMessage(`{"final":true}`)
 		st := &MockStore{
-			Events: []store.Event{
+			Events: []store.DecodedEvent{
 				{
-					ID:        "0000000000000003-000",
-					Ledger:    12,
-					TopicsXDR: "CCC==",
-					Value:     val,
+					ID:      "0000000000000003-000",
+					Ledger:  12,
+					DataXDR: "CCC==",
+					Value:   val,
 				},
 			},
 		}
@@ -210,22 +170,24 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 			},
 		}
 
-		err := Run(ctx, st, dec, 12, 12, 100)
+		r := New(st, dec, slog.Default(), Options{FromLedger: 12, ToLedger: 12, BatchSize: 100})
+		_, err := r.Run(ctx)
 		require.NoError(t, err)
 
-		err = Run(ctx, st, dec, 12, 12, 100)
+		r2 := New(st, dec, slog.Default(), Options{FromLedger: 12, ToLedger: 12, BatchSize: 100})
+		_, err = r2.Run(ctx)
 		require.NoError(t, err)
 	})
 
 	t.Run("decode failure being counted and skipped rather than fatal", func(t *testing.T) {
 		ctx := context.Background()
 		st := &MockStore{
-			Events: []store.Event{
+			Events: []store.DecodedEvent{
 				{
-					ID:        "0000000000000004-000",
-					Ledger:    13,
-					TopicsXDR: "BAD==",
-					Value:     json.RawMessage(`{}`),
+					ID:      "0000000000000004-000",
+					Ledger:  13,
+					DataXDR: "BAD==",
+					Value:   json.RawMessage(`{}`),
 				},
 			},
 		}
@@ -233,16 +195,17 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 			FailCount: 1,
 		}
 
-		err := Run(ctx, st, dec, 13, 13, 100)
+		r := New(st, dec, slog.Default(), Options{FromLedger: 13, ToLedger: 13, BatchSize: 100})
+		_, err := r.Run(ctx)
 		require.NoError(t, err)
 	})
 
 	t.Run("per-batch progress bounding the work lost to an interrupt", func(t *testing.T) {
 		ctx := context.Background()
 		st := &MockStore{
-			Events: []store.Event{
-				{ID: "1", Ledger: 20, TopicsXDR: "X1"},
-				{ID: "2", Ledger: 21, TopicsXDR: "X2"},
+			Events: []store.DecodedEvent{
+				{ID: "1", Ledger: 20, DataXDR: "X1"},
+				{ID: "2", Ledger: 21, DataXDR: "X2"},
 			},
 		}
 		dec := &replayMockDecoder{
@@ -251,7 +214,10 @@ func TestReplay_BatchAndProgressHandling(t *testing.T) {
 			},
 		}
 
-		err := Run(ctx, st, dec, 20, 21, 1)
+		r := New(st, dec, slog.Default(), Options{FromLedger: 20, ToLedger: 21, BatchSize: 1})
+		_, err := r.Run(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(21), st.ReplayState.LastLedger)
 		require.NoError(t, err)
 		assert.Equal(t, int64(21), st.ReplayState.LastLedger)
 	})
