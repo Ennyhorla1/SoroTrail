@@ -78,7 +78,7 @@ func (m *mockArithmeticStore) PruneEvents(ctx context.Context, olderThan int64, 
 	return 0, nil
 }
 
-func (m *mockArithmeticStore) AggregateEvents(context.Context, store.EventFilter, store.Scope) ([]any, error) {
+func (m *mockArithmeticStore) AggregateEvents(ctx context.Context, filter store.EventFilter, scope store.Scope) ([]any, error) {
 	return nil, nil
 }
 
