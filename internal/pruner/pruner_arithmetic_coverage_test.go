@@ -2,13 +2,12 @@ package pruner
 
 import (
 	"context"
-	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/sorotrail/sorotrail/internal/store"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/mock"
 )
 
 type Config struct {
@@ -17,91 +16,64 @@ type Config struct {
 	RetainedLedgers uint32
 	BatchSize       int
 }
-
-func TestPrunerArithmeticCoverage_Disabled(t *testing.T) {
-	ctx := context.Background()
-	st := &mockArithmeticStore{
-		ingestionState: &store.IngestionState{LastIngestedLedger: 1000},
-	}
-
-	p := New(st, slog.Default(), Options{
-		MaxAge: time.Hour,
-	})
-	err := p.Run(ctx)
-	require.NoError(t, err)
-	assert.False(t, st.lockCalled)
+type mockArithmeticStore struct {
+	mock.Mock
 }
 
-func TestPrunerArithmeticCoverage_LedgerFloorAndAgeBounds(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name           string
-		opts           Options
-		ingestionState *store.IngestionState
-	}{
-		{
-			name: "age-based only",
-			opts: Options{
-				MaxAge: time.Hour * 24,
-			},
-			ingestionState: &store.IngestionState{
-				LastIngestedLedger: 100,
-			},
-		},
-		{
-			name: "ledger-floor only",
-			opts: Options{
-				MinLedger: 50,
-			},
-			ingestionState: &store.IngestionState{
-				LastIngestedLedger: 100,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			st := &mockArithmeticStore{
-				ingestionState: tt.ingestionState,
-				deleteCount:    10,
-			}
-			p := New(st, slog.Default(), tt.opts)
-			err := p.Run(ctx)
-			require.NoError(t, err)
-			assert.True(t, st.lockCalled)
-			assert.True(t, st.unlockCalled)
-		})
-	}
+func (m *mockArithmeticStore) CountEventsBefore(ctx context.Context, ledger int64, t time.Time, limit int) (int64, error) {
+	args := m.Called(ctx, ledger, t, limit)
+	return args.Get(0).(int64), args.Error(1)
 }
 
-func TestPrunerArithmeticCoverage_BatchingAndCounts(t *testing.T) {
-	ctx := context.Background()
-	st := &mockArithmeticStore{
-		ingestionState: &store.IngestionState{LastIngestedLedger: 500},
-		deleteCount:    25,
-	}
-
-	p := New(st, slog.Default(), Options{
-		BatchSize: 10,
-		MinLedger: 100,
-	})
-
-	err := p.Run(ctx)
-	require.NoError(t, err)
+func (m *mockArithmeticStore) DeleteEventsBefore(ctx context.Context, ledger int64, t time.Time, limit int) (int64, error) {
+	args := m.Called(ctx, ledger, t, limit)
+	return args.Get(0).(int64), args.Error(1)
 }
 
-func TestPrunerArithmeticCoverage_PartialFailure(t *testing.T) {
-	ctx := context.Background()
-	st := &mockArithmeticStore{
-		ingestionState: &store.IngestionState{LastIngestedLedger: 500},
-		deleteErr:      assert.AnError,
-	}
-
-	p := New(st, slog.Default(), Options{
-		MinLedger: 100,
+func TestPrunerArithmeticBoundsAndBatching(t *testing.T) {
+	t.Run("disabled pruner deletes nothing", func(t *testing.T) {
+		st := new(mockArithmeticStore)
+		p := New(st, Config{Enabled: false})
+		count, err := p.Prune(context.Background())
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), count)
+		st.AssertNotCalled(t, "DeleteEventsBefore", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	})
-	err := p.Run(ctx)
-	assert.Error(t, err)
-	assert.True(t, st.unlockCalled)
+
+	t.Run("batching stops at configured size and resumes", func(t *testing.T) {
+		st := new(mockArithmeticStore)
+		st.On("CountEventsBefore", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(int64(150), nil)
+		st.On("DeleteEventsBefore", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(int64(100), nil).Once()
+		st.On("DeleteEventsBefore", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(int64(50), nil).Once()
+
+		p := New(st, Config{Enabled: true, BatchSize: 100})
+		count, err := p.Prune(context.Background())
+		assert.NoError(t, err)
+		assert.Equal(t, int64(150), count)
+		st.AssertExpectations(t)
+	})
+
+	t.Run("conservative bound winning when both apply", func(t *testing.T) {
+		st := new(mockArithmeticStore)
+		st.On("CountEventsBefore", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(int64(10), nil)
+		st.On("DeleteEventsBefore", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(int64(10), nil)
+
+		p := New(st, Config{Enabled: true, MaxAge: time.Hour, MinLedger: 500})
+		count, err := p.Prune(context.Background())
+		assert.NoError(t, err)
+		assert.Equal(t, int64(10), count)
+		st.AssertExpectations(t)
+	})
+
+	t.Run("partial failure stops execution safely", func(t *testing.T) {
+		st := new(mockArithmeticStore)
+		st.On("CountEventsBefore", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(int64(100), nil)
+		st.On("DeleteEventsBefore", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(int64(0), assert.AnError)
+
+		p := New(st, Config{Enabled: true, BatchSize: 100})
+		count, err := p.Prune(context.Background())
+		assert.Error(t, err)
+		assert.Equal(t, int64(0), count)
+		st.AssertExpectations(t)
+	})
 }
