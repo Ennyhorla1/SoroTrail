@@ -117,9 +117,9 @@ func TestRunCompletionTo(t *testing.T) {
 func TestCompletionMatchesDispatch(t *testing.T) {
 	t.Parallel()
 	dispatched := []string{
-		"replay", "apikey", "backfill", "index-addresses",
+		"replay", "apikey", "contracts", "backfill", "index-addresses",
 		"migrate", "healthcheck", "schema-inspect", "migrate-status",
-		"completion", "help",
+		"completion", "version", "config", "help",
 	}
 	completion := completionNames()
 	assert.ElementsMatch(t, dispatched, completion,

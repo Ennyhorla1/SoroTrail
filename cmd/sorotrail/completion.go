@@ -24,6 +24,7 @@ type completionCommand struct {
 var completionCommands = []completionCommand{
 	{"replay", "re-decode stored events with the current decoder"},
 	{"apikey", "issue, list, and revoke API keys"},
+	{"contracts", "add, list, and remove watched contracts"},
 	{"backfill", "ingest historical contract events from Horizon"},
 	{"index-addresses", "rebuild the address to event inverted index"},
 	{"migrate", "apply, roll back, or inspect database migrations"},
@@ -31,6 +32,8 @@ var completionCommands = []completionCommand{
 	{"schema-inspect", "report migration state, partitions, and table sizes"},
 	{"migrate-status", "report pending migrations without applying them"},
 	{"completion", "print a shell completion script"},
+	{"version", "print the build version, commit, and build date"},
+	{"config", "print the effective configuration with secrets redacted"},
 	{"help", "show this help message"},
 }
 
@@ -123,7 +126,7 @@ _sorotrail() {
 	b.WriteString(strings.Join(completionNames(), " "))
 	b.WriteString(`" -- "$cur"))
     else
-        COMPREPLY=($(compgen -W "--help -h" -- "$cur") $(compgen -f -- "$cur"))
+        COMPREPLY=($(compgen -W "--help -h --dry-run" -- "$cur") $(compgen -f -- "$cur"))
     fi
 }
 complete -F _sorotrail sorotrail
@@ -169,6 +172,7 @@ func fishCompletionScript() string {
 #   sorotrail completion fish > ~/.config/fish/completions/sorotrail.fish
 
 complete -c sorotrail -f
+complete -c sorotrail -l dry-run -d 'fetch and log planned writes without writing'
 `)
 	for _, c := range completionCommands {
 		fmt.Fprintf(&b,
