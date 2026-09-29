@@ -22,7 +22,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
-	"github.com/stretchr/testify/assert"
 	"net/http"
 	"net/http/httptest"
 	"os"
