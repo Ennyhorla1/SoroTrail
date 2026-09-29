@@ -1,3 +1,6 @@
+// Package pruner runs an optional background job that deletes events older
+// than a configured age or below a configured ledger, with safe batching
+// so it never takes long locks or starves ingestion.
 package pruner
 
 import (
