@@ -77,6 +77,11 @@ type JitterFunc func(max time.Duration) time.Duration
 // RealJitter is the wall-clock jitter function.
 func RealJitter(max time.Duration) time.Duration { return rand.N(max) }
 
+// DefaultRetentionLedgers is the cold-start reach-back in ledgers. The API
+// and ingester must use the same window so watched-contract backfills align
+// with a fresh ingester cold start.
+const DefaultRetentionLedgers uint32 = 17280
+
 // Options configure an Ingester.
 type Options struct {
 	// Clock supplies time and sleeping. Defaults to RealClock; simulations
@@ -220,7 +225,7 @@ func (o *Options) applyDefaults() {
 		o.PollInterval = 5 * time.Second
 	}
 	if o.RetentionLedgers == 0 {
-		o.RetentionLedgers = 17280
+		o.RetentionLedgers = DefaultRetentionLedgers
 	}
 	if o.PageLimit == 0 {
 		o.PageLimit = 1000
