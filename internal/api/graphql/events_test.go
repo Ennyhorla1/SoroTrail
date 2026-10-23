@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -66,6 +65,32 @@ func (s *stubStore) ListWatchedContracts(_ context.Context) ([]store.WatchedCont
 	return s.watchedList, s.watchedListErr
 }
 
+func (s *stubStore) ListWatchedContractsScoped(_ context.Context, sc store.Scope) ([]store.WatchedContract, error) {
+	if s.watchedListErr != nil {
+		return nil, s.watchedListErr
+	}
+	if sc.DeniesAll() {
+		return []store.WatchedContract{}, nil
+	}
+	out := make([]store.WatchedContract, 0, len(s.watchedList))
+	for _, wc := range s.watchedList {
+		if sc.Allows(wc.ContractID) {
+			out = append(out, wc)
+		}
+	}
+	return out, nil
+}
+
+func (s *stubStore) GetContractSpecOverride(context.Context, string) ([]byte, error) {
+	return nil, nil
+}
+func (s *stubStore) SetContractSpecOverride(context.Context, string, []byte) error {
+	return nil
+}
+func (s *stubStore) DeleteContractSpecOverride(context.Context, string) error {
+	return nil
+}
+
 // newGraphQLTestServer wires the stub store and returns a Handler.
 func newGraphQLTestServer(t *testing.T, st *stubStore) *Handler {
 	t.Helper()
@@ -74,14 +99,22 @@ func newGraphQLTestServer(t *testing.T, st *stubStore) *Handler {
 	return h
 }
 
-// postQuery POSTs a GraphQL query document to the test server and
-// returns the parsed JSON envelope. Queries must be valid SDL — a
-// leading `{` is required.
+// postQuery POSTs a GraphQL query document to the test server as a
+// single-tenant (wildcard scope) principal and returns the parsed JSON
+// envelope. Queries must be valid SDL — a leading `{` is required.
 func postQuery(t *testing.T, h *Handler, q string) map[string]any {
+	t.Helper()
+	return postQueryWithContext(t, h, api.WithPrincipal(context.Background(), api.Principal{
+		Scope:      store.WildcardScope(),
+		Untenanted: true,
+	}), q)
+}
+
+func postQueryWithContext(t *testing.T, h *Handler, ctx context.Context, q string) map[string]any {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"query": q})
 	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/graphql", bytes.NewReader(body)).WithContext(ctx)
 	h.ServeHTTP(w, req)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
@@ -265,7 +298,6 @@ func TestBuildEventFilterDirectly(t *testing.T) {
 			Filter: &FilterInput{
 				ContractID:    knownContractID,
 				Types:         []string{"contract", "system"},
-				Topic:         json.RawMessage(`["topic0"]`),
 				Topics:        &TopicPositionInput{T0: json.RawMessage(`"t0val"`)},
 				TopicContains: json.RawMessage(`["contains"]`),
 				TxHash:        "abcdef",
@@ -286,8 +318,8 @@ func TestBuildEventFilterDirectly(t *testing.T) {
 
 		assert.Equal(t, knownContractID, filter.ContractID)
 		assert.Equal(t, []string{"contract", "system"}, filter.Types)
-		assert.JSONEq(t, `["topic0"]`, string(filter.Topic))
-		assert.JSONEq(t, `"t0val"`, string(filter.Topics.T0))
+		assert.Nil(t, filter.Topic, "topic and topic0 are mutually exclusive")
+		assert.JSONEq(t, `"t0val"`, string(filter.Topic0))
 		assert.JSONEq(t, `["contains"]`, string(filter.TopicContains))
 		assert.Equal(t, "abcdef", filter.TxHash)
 		assert.Equal(t, int64(100), filter.FromLedger)
@@ -309,7 +341,7 @@ func TestBuildEventFilterDirectly(t *testing.T) {
 		assert.Empty(t, filter.ContractID)
 		assert.Empty(t, filter.Types)
 		assert.Nil(t, filter.Topic)
-		assert.Nil(t, filter.Topics)
+		assert.Nil(t, filter.Topic0)
 		assert.Nil(t, filter.TopicContains)
 		assert.Empty(t, filter.TxHash)
 		assert.Zero(t, filter.FromLedger)
@@ -331,7 +363,7 @@ func TestBuildEventFilterDirectly(t *testing.T) {
 
 	// Test scope attachment via context principal
 	t.Run("scope attached from context principal", func(t *testing.T) {
-		specificScope := store.Scope{TenantID: "tenant-123"}
+		specificScope := store.NewScope([]string{knownContractID})
 		authCtx := api.WithPrincipal(ctx, api.Principal{Scope: specificScope})
 
 		// Since buildEventFilter doesn't receive ctx directly in its signature (wait, let's verify if buildEventFilter takes ctx or not, or if scopeFrom uses ctx internally),

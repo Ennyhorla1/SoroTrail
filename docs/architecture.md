@@ -38,6 +38,148 @@ discrepancies.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### Component diagram
+
+The same picture with the boundaries made explicit: what runs inside the
+process, what it talks to over the network, and what it owns on disk. Solid
+arrows are calls, dashed arrows are background paths that run on their own
+schedule.
+
+```mermaid
+flowchart TB
+    subgraph external["External systems"]
+        RPCEP["Stellar RPC<br/>(getEvents, getLedgerEntries)"]
+        CLIENT["API clients<br/>(HTTP, WebSocket, GraphQL)"]
+        HOOKS["Webhook subscribers"]
+    end
+
+    subgraph process["sorotrail process"]
+        direction TB
+        subgraph write["Write path"]
+            ING["ingester<br/>polling loop + cursor"]
+            DEC["decode<br/>ScVal → JSON"]
+        end
+        subgraph read["Read path"]
+            API["api<br/>chi router, scope, cache"]
+            ENR["spec<br/>spec-driven enrichment"]
+            BCAST["broadcast<br/>pub-sub fan-out"]
+        end
+        subgraph background["Background workers"]
+            AUD["audit<br/>census + repair"]
+            PRUNE["pruner<br/>retention"]
+            WH["webhook<br/>signed delivery"]
+        end
+        STORE["store<br/>store.Store interface"]
+    end
+
+    subgraph storage["Durable state"]
+        PG[("PostgreSQL<br/>partitioned events,<br/>raw XDR, replay_state")]
+    end
+
+    CLI["sorotrail replay<br/>(separate invocation)"]
+
+    RPCEP -->|"raw events"| ING
+    ING --> DEC
+    DEC -->|"decoded + raw XDR"| STORE
+    ING -.->|"publish"| BCAST
+    ING -.->|"notify"| WH
+    WH -.->|"POST"| HOOKS
+    BCAST -.->|"subscribe"| API
+
+    CLIENT -->|"requests"| API
+    API --> STORE
+    API --> ENR
+    ENR -->|"contract spec"| RPCEP
+    ENR --> STORE
+
+    AUD -.->|"re-fetch range"| RPCEP
+    AUD -.->|"census, findings"| STORE
+    AUD -.->|"reingest"| ING
+    PRUNE -.->|"delete past retention"| STORE
+
+    STORE <-->|"SQL"| PG
+    CLI -->|"re-decode stored XDR"| PG
+```
+
+Everything inside `sorotrail process` is wired through interfaces at
+`cmd/sorotrail`, which is why the write path, the read path and the
+background workers can each be tested against stubs. `sorotrail replay` is
+deliberately outside the box: it is its own invocation of the binary and
+reaches Postgres directly, never through the running process.
+
+### Request and ingest lifecycle
+
+How one event gets from the chain into a response, including the two places
+a client can be served without a fresh database read.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RPC as Stellar RPC
+    participant Ing as Ingester
+    participant Dec as Decoder
+    participant PG as Postgres
+    participant API as HTTP API
+    participant C as Client
+
+    loop every POLL_INTERVAL (adaptive)
+        Ing->>RPC: getEvents(startLedger, cursor, filters)
+        RPC-->>Ing: page of events + cursor
+        Ing->>Dec: DecodeScVal(topics, value)
+        Dec-->>Ing: JSON + raw base64 XDR
+        Ing->>PG: UpsertEvents (idempotent, by primary key)
+        Ing->>PG: advance ingestion cursor (same tx)
+    end
+
+    C->>API: GET /events?contract_id=…&decoded=true
+    API->>PG: QueryEvents(filter)
+    PG-->>API: page + next cursor
+    opt ?decoded=true
+        API->>API: enrich against contract spec
+    end
+    API-->>C: 200 + X-Total-Count + cursor
+
+    Note over API,C: ?decoded=false skips enrichment and the<br/>SEP-41 envelope: stored columns, verbatim.
+
+    C->>API: GET /events/{id} (If-None-Match)
+    API-->>C: 304 Not Modified (immutable, no row read)
+```
+
+### Replay lifecycle
+
+Replay is the one path that writes to rows it did not ingest. Its batch
+boundary is what makes an interrupted run safe.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Op as Operator
+    participant R as sorotrail replay
+    participant PG as Postgres
+    participant Dec as Decoder
+
+    Op->>R: replay --from-ledger N [--dry-run]
+    R->>PG: pg_try_advisory_lock("SoroRepl")
+    alt lock not granted
+        PG-->>R: false
+        R-->>Op: "another replay is already running" (exit 1)
+    else lock granted
+        PG-->>R: true
+        loop until range exhausted or ^C
+            R->>PG: NextReplayBatch(range, batch-size)
+            PG-->>R: rows + raw XDR
+            R->>Dec: re-decode raw XDR
+            Dec-->>R: new decoded columns
+            R->>PG: CommitReplayBatch (changed rows + replay_state, one tx)
+        end
+        R-->>Op: summary (processed / changed / skipped / failed)
+    end
+```
+
+Progress and rewrites commit together, so a committed cursor can never run
+ahead of committed rewrites — the property the resume path depends on. See
+[replay.md](replay.md) for the operational workflow.
+
 ### Data flow
 
 ```mermaid
@@ -137,11 +279,19 @@ enables alternative storage backends without changing any consumer.
 | `Stats` | Aggregate statistics for `/stats` |
 | `Ping` | Dependency health check |
 
-#### Postgres backend (`store.Postgres`)
+#### Backend implementations
 
-The only backend implemented today. Uses `pgx` (plain SQL, no ORM) with a
-connection pool. Schema changes are managed via numbered migration pairs in
-`internal/store/migrations/`.
+- **Postgres** (`store.Postgres`) is the reference backend. It uses `pgx`
+  (plain SQL, no ORM) with a connection pool, and schema changes are managed
+  via numbered migration pairs in `internal/store/migrations/`.
+- **SQLite** (`store.SQLite`) is the single-node backend selected with a
+  `sqlite:` URL. It implements the event path and contract inventory; token
+  metadata enrichment remains Postgres-only and refuses explicitly.
+- **ClickHouse** (`store.ClickHouse`) is an optional analytical backend
+  selected with a `clickhouse:` URL. It is not a drop-in replacement for
+  Postgres: some methods refuse and others silently return zero values. Its
+  capability matrix is documented in
+  [ClickHouse backend support](clickhouse.md).
 
 **Schema highlights:**
 
@@ -309,14 +459,20 @@ ingest rather than silently producing incorrect results:
 The `store.Store` interface is the persistence boundary. It is designed so
 that each method is independently testable and replaceable:
 
-- **Postgres** (`store.Postgres`): the only backend implemented today.
-  Uses `pgx` with plain SQL. Migrations are numbered pairs in
+- **Postgres** (`store.Postgres`) is the reference backend. It uses `pgx`
+  with plain SQL. Migrations are numbered pairs in
   `internal/store/migrations/`.
 
-- **Alternative backends**: the interface is intentionally minimal. A
-  contributor can implement `Store` for SQLite, DynamoDB, or any other
-  persistence layer. The contract requires `QueryEvents` to return events
-  in ascending ID order for cursor pagination to work.
+- **SQLite and ClickHouse** are the alternative backends selected by
+  `DATABASE_URL`. SQLite implements the event path and contract inventory for
+  single-node deployments; ClickHouse is an optional analytical backend whose
+  support matrix — including the methods that silently do nothing — is in
+  [ClickHouse backend support](clickhouse.md).
+
+- **Further backends**: the interface is intentionally minimal. A contributor
+  can implement `Store` for DynamoDB or another persistence layer. The
+  contract requires `QueryEvents` to return events in ascending ID order for
+  cursor pagination to work.
 
 Replay-specific persistence (`store.ReplayLock`, `GetReplayState`, etc.) is
 deliberately **not** part of the `Store` interface. It lives on
@@ -331,6 +487,8 @@ forced to implement one.
 | Stellar RPC client | ✅ Complete — `getEvents`, `getLatestLedger`, `getHealth` |
 | XDR decoder | ✅ Complete — all ScVal types handled, lossless fallback |
 | Postgres store | ✅ Complete — full `Store` interface implemented |
+| SQLite store | ✅ Event path + contract inventory; token metadata enrichment refuses explicitly |
+| ClickHouse store | ⚠️ Optional analytical backend with documented gaps — see [ClickHouse backend support](clickhouse.md) |
 | Ingester | ✅ Complete — cold/warm start, filter batching, backoff |
 | HTTP API | ✅ Complete — events, health, stats, contract queries |
 | Auditor | ✅ Complete — verification, auto-repair, finding lifecycle |
@@ -382,6 +540,7 @@ internal/replay
 
 No circular dependencies. Each package depends only on interfaces from its
 neighbors, so the whole graph is independently testable.
+
 ## Overview
 
 SoroTrail is a contract event indexer for the Stellar/Soroban network. It polls
@@ -566,6 +725,25 @@ ingester logs a warning and skips ahead to the oldest retained ledger.
 **Extension interface:** `ingester.EventNotifier` — attach post-ingest
 hooks (webhook delivery, SSE, etc.) without modifying the loop.
 
+#### The watch list and its network dimension
+
+Every watch-list row is keyed by `(network, contract_id)` (migration `0027`), where an empty network is normalized to `'default'`. The store surfaces the union of the operator table (`watched_contracts`) and the multi-tenant table (`tenant_watched_contracts`):
+
+```sql
+SELECT network, contract_id FROM watched_contracts
+UNION
+SELECT network, contract_id FROM tenant_watched_contracts
+```
+
+How `NETWORK` flows through startup, the API, and ingestion:
+
+- **Startup seeding (`cmd/sorotrail/main.go`)**: each contract in `WATCHED_CONTRACTS` is seeded via `AddWatchedContract` with `Network: cfg.Network` (`default` when `NETWORK` is unset).
+- **Operator runtime API (`POST /watched-contracts`, `DELETE /watched-contracts/{id}`)**: `POST /watched-contracts` accepts an optional `"network"` field in the request body; when omitted or empty, the API server falls back to its configured `NETWORK` (`default` if unset). `DELETE /watched-contracts/{id}` accepts `?network=<name>` with the same fallback. `GET /watched-contracts` returns every `(network, contract_id)` pair across all networks, plus the `from_config` overlay for the API process's own network.
+- **Filter batch selection (`buildFilterBatches` in `internal/ingester/ingester.go`)**: on every cycle, the ingester calls `ListWatchedContracts(ctx)` and keeps only entries whose `network` matches the ingester's configured `NETWORK` (treating `""` as `"default"`).
+  - If the filtered list for **that network** is empty, `buildFilterBatches` returns a single type-only filter (`[{Type: "contract"}]`) and the ingester indexes **all** contract events on its network — even if other networks have explicit watch-list rows in the same database.
+  - If one or more contracts are watched on that network, `buildFilterBatches` packs those contract IDs into batches of up to 5 filters × 5 contract IDs (25 contracts per RPC request chain).
+- **Multi-network shared-database topology**: because `events`, `ingestion_state`, `audit_state`, `audit_findings`, and `watched_contracts` are all partitioned or keyed by `network`, a single Postgres database can back multiple SoroTrail processes — one ingester per network (for example, one process with `NETWORK=testnet` and another with `NETWORK=mainnet`). Each ingester advances its own `ingestion_state` row and polls only the contracts registered for its `NETWORK`, while read servers query across or within networks without interference.
+
 ### [`internal/broadcast`](../internal/broadcast/) — Pub-sub stream
 
 The `Broadcaster` distributes ingested events to live subscribers (WebSocket
@@ -580,7 +758,8 @@ silently evicted to prevent back-pressure on the ingester.
 - `SubscriberCount()` — observable metric for operators.
 
 The broadcaster is wired in `main.go` and consumed by the WebSocket
-handler (`GET /events/ws`).
+handler (`GET /events/ws`). See [Live Subscriptions](subscriptions.md) for
+the delivery guarantees, reconnection guidance, and the catch-up pattern.
 
 ### [`internal/webhook`](../internal/webhook/) — Async delivery
 

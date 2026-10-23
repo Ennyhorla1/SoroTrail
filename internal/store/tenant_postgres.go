@@ -183,7 +183,8 @@ func (p *Postgres) ScopeForTenant(ctx context.Context, t Tenant) (Scope, error) 
 //
 // Both checks and the insert run in one transaction, so two concurrent
 // requests cannot each observe headroom for the last slot and both take it.
-func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, contractID string, instanceCap int) error {
+func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, network, contractID string, instanceCap int) error {
+	network = defaultNetwork(network)
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("starting watch-list transaction: %w", err)
@@ -195,7 +196,7 @@ func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, contr
 	var exists int
 	err = tx.QueryRow(ctx, `
 		SELECT 1 FROM tenant_watched_contracts
-		WHERE tenant_id = $1 AND contract_id = $2`, t.ID, contractID).Scan(&exists)
+		WHERE tenant_id = $1 AND network = $2 AND contract_id = $3`, t.ID, network, contractID).Scan(&exists)
 	if err == nil {
 		return nil
 	}
@@ -219,8 +220,9 @@ func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, contr
 	if instanceCap > 0 {
 		// The instance cap bounds the union, not any single list: what
 		// costs the operator RPC budget is the number of distinct
-		// contracts ingestion must poll. A contract another tenant already
-		// watches is therefore free to add.
+		// (network, contract_id) pairs ingestion must poll. A contract
+		// another tenant already watches on this network is therefore free
+		// to add.
 		var unionSize int
 		if err := tx.QueryRow(ctx,
 			`SELECT count(*) FROM (`+watchedContractsUnion+`) u`).Scan(&unionSize); err != nil {
@@ -228,8 +230,8 @@ func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, contr
 		}
 		var alreadyWatched int
 		err := tx.QueryRow(ctx,
-			`SELECT 1 FROM (`+watchedContractsUnion+`) u WHERE contract_id = $1`,
-			contractID).Scan(&alreadyWatched)
+			`SELECT 1 FROM (`+watchedContractsUnion+`) u WHERE network = $1 AND contract_id = $2`,
+			network, contractID).Scan(&alreadyWatched)
 		switch {
 		case err == nil:
 			// Already in the union; adding this tenant's claim does not
@@ -245,8 +247,9 @@ func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, contr
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO tenant_watched_contracts (tenant_id, contract_id)
-		VALUES ($1, $2) ON CONFLICT DO NOTHING`, t.ID, contractID); err != nil {
+		INSERT INTO tenant_watched_contracts (tenant_id, network, contract_id)
+		VALUES ($1, $2, $3) ON CONFLICT (tenant_id, network, contract_id) DO NOTHING`,
+		t.ID, network, contractID); err != nil {
 		return fmt.Errorf("adding tenant watched contract: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -255,20 +258,22 @@ func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, contr
 	return nil
 }
 
-func (p *Postgres) RemoveTenantWatchedContract(ctx context.Context, tenantID int64, contractID string) error {
+func (p *Postgres) RemoveTenantWatchedContract(ctx context.Context, tenantID int64, network, contractID string) error {
+	network = defaultNetwork(network)
 	_, err := p.pool.Exec(ctx,
-		`DELETE FROM tenant_watched_contracts WHERE tenant_id = $1 AND contract_id = $2`,
-		tenantID, contractID)
+		`DELETE FROM tenant_watched_contracts WHERE tenant_id = $1 AND network = $2 AND contract_id = $3`,
+		tenantID, network, contractID)
 	if err != nil {
 		return fmt.Errorf("removing tenant watched contract: %w", err)
 	}
 	return nil
 }
 
-func (p *Postgres) ListTenantWatchedContracts(ctx context.Context, tenantID int64) ([]string, error) {
+func (p *Postgres) ListTenantWatchedContracts(ctx context.Context, tenantID int64, network string) ([]string, error) {
+	network = defaultNetwork(network)
 	return p.queryContractIDs(ctx,
-		`SELECT contract_id FROM tenant_watched_contracts WHERE tenant_id = $1 ORDER BY contract_id`,
-		tenantID)
+		`SELECT contract_id FROM tenant_watched_contracts WHERE tenant_id = $1 AND network = $2 ORDER BY contract_id`,
+		tenantID, network)
 }
 
 // queryContractIDs runs query — whose first column is a contract id — and
@@ -304,37 +309,37 @@ func contractIDs(rows pgx.Rows) ([]string, error) {
 
 const apiKeyColumns = `id, tenant_id, name, prefix, created_at, last_used_at, revoked_at`
 
-func scanAPIKey(row rowScanner) (APIKey, error) {
-	var k APIKey
+func scanTenantAPIKey(row rowScanner) (TenantAPIKey, error) {
+	var k TenantAPIKey
 	err := row.Scan(&k.ID, &k.TenantID, &k.Name, &k.Prefix,
 		&k.CreatedAt, &k.LastUsedAt, &k.RevokedAt)
 	return k, err
 }
 
-func (p *Postgres) CreateAPIKey(ctx context.Context, tenantID int64, name, prefix string, digest []byte) (APIKey, error) {
+func (p *Postgres) CreateTenantAPIKey(ctx context.Context, tenantID int64, name, prefix string, digest []byte) (TenantAPIKey, error) {
 	row := p.pool.QueryRow(ctx, `
-		INSERT INTO api_keys (tenant_id, name, prefix, key_hash)
+		INSERT INTO tenant_api_keys (tenant_id, name, prefix, key_hash)
 		VALUES ($1, $2, $3, $4)
 		RETURNING `+apiKeyColumns,
 		tenantID, name, prefix, digest)
-	k, err := scanAPIKey(row)
+	k, err := scanTenantAPIKey(row)
 	if isUniqueViolation(err) {
-		return APIKey{}, ErrDuplicate
+		return TenantAPIKey{}, ErrDuplicate
 	}
 	if err != nil {
-		return APIKey{}, fmt.Errorf("creating api key: %w", err)
+		return TenantAPIKey{}, fmt.Errorf("creating api key: %w", err)
 	}
 	return k, nil
 }
 
-// CreateAPIKeyIfAbsent inserts the key unless its prefix is already present.
+// CreateTenantAPIKeyIfAbsent inserts the key unless its prefix is already present.
 // The digest is refreshed on conflict so that rotating the bootstrap value
 // in the environment actually takes effect, and revoked_at is cleared so a
 // restart with the key still configured restores it deliberately rather than
 // leaving a confusing tombstone.
-func (p *Postgres) CreateAPIKeyIfAbsent(ctx context.Context, tenantID int64, name, prefix string, digest []byte) error {
+func (p *Postgres) CreateTenantAPIKeyIfAbsent(ctx context.Context, tenantID int64, name, prefix string, digest []byte) error {
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO api_keys (tenant_id, name, prefix, key_hash)
+		INSERT INTO tenant_api_keys (tenant_id, name, prefix, key_hash)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (prefix) DO UPDATE SET
 			key_hash   = EXCLUDED.key_hash,
@@ -347,21 +352,21 @@ func (p *Postgres) CreateAPIKeyIfAbsent(ctx context.Context, tenantID int64, nam
 	return nil
 }
 
-// LookupAPIKey resolves a key prefix to its record, digest and tenant in one
+// LookupTenantAPIKey resolves a key prefix to its record, digest and tenant in one
 // round trip. Revoked keys are excluded here rather than checked by the
 // caller, so a forgotten check cannot resurrect a revoked credential.
-func (p *Postgres) LookupAPIKey(ctx context.Context, prefix string) (APIKey, []byte, Tenant, error) {
+func (p *Postgres) LookupTenantAPIKey(ctx context.Context, prefix string) (TenantAPIKey, []byte, Tenant, error) {
 	row := p.pool.QueryRow(ctx, `
 		SELECT k.id, k.tenant_id, k.name, k.prefix, k.created_at, k.last_used_at, k.revoked_at,
 		       k.key_hash,
 		       t.id, t.name, t.wildcard, t.is_admin, t.enabled,
 		       t.rate_limit_rps, t.rate_limit_burst, t.max_watched_contracts, t.created_at
-		FROM api_keys k
+		FROM tenant_api_keys k
 		JOIN tenants t ON t.id = k.tenant_id
 		WHERE k.prefix = $1 AND k.revoked_at IS NULL`, prefix)
 
 	var (
-		k      APIKey
+		k      TenantAPIKey
 		digest []byte
 		t      Tenant
 	)
@@ -370,33 +375,33 @@ func (p *Postgres) LookupAPIKey(ctx context.Context, prefix string) (APIKey, []b
 		&t.ID, &t.Name, &t.Wildcard, &t.Admin, &t.Enabled,
 		&t.RateLimitRPS, &t.RateLimitBurst, &t.MaxWatchedContracts, &t.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return APIKey{}, nil, Tenant{}, ErrNotFound
+		return TenantAPIKey{}, nil, Tenant{}, ErrNotFound
 	}
 	if err != nil {
-		return APIKey{}, nil, Tenant{}, fmt.Errorf("looking up api key: %w", err)
+		return TenantAPIKey{}, nil, Tenant{}, fmt.Errorf("looking up api key: %w", err)
 	}
 	return k, digest, t, nil
 }
 
-// TouchAPIKey records last use. Failures are the caller's to ignore: this is
+// TouchTenantAPIKey records last use. Failures are the caller's to ignore: this is
 // observability, and a write error here must not deny an otherwise valid
 // request.
-func (p *Postgres) TouchAPIKey(ctx context.Context, id int64) error {
-	_, err := p.pool.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, id)
+func (p *Postgres) TouchTenantAPIKey(ctx context.Context, id int64) error {
+	_, err := p.pool.Exec(ctx, `UPDATE tenant_api_keys SET last_used_at = now() WHERE id = $1`, id)
 	return err
 }
 
-func (p *Postgres) ListAPIKeys(ctx context.Context, tenantID int64) ([]APIKey, error) {
+func (p *Postgres) ListTenantAPIKeys(ctx context.Context, tenantID int64) ([]TenantAPIKey, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT `+apiKeyColumns+` FROM api_keys WHERE tenant_id = $1 ORDER BY id`, tenantID)
+		`SELECT `+apiKeyColumns+` FROM tenant_api_keys WHERE tenant_id = $1 ORDER BY id`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("listing api keys: %w", err)
 	}
 	defer rows.Close()
 
-	keys := []APIKey{}
+	keys := []TenantAPIKey{}
 	for rows.Next() {
-		k, err := scanAPIKey(rows)
+		k, err := scanTenantAPIKey(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -405,9 +410,9 @@ func (p *Postgres) ListAPIKeys(ctx context.Context, tenantID int64) ([]APIKey, e
 	return keys, rows.Err()
 }
 
-func (p *Postgres) RevokeAPIKey(ctx context.Context, id int64) error {
+func (p *Postgres) RevokeTenantAPIKey(ctx context.Context, id int64) error {
 	tag, err := p.pool.Exec(ctx,
-		`UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`, id)
+		`UPDATE tenant_api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`, id)
 	if err != nil {
 		return fmt.Errorf("revoking api key: %w", err)
 	}

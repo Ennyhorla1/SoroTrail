@@ -29,10 +29,10 @@ func testTenantStore(t *testing.T) *Postgres {
 	t.Helper()
 	p := testStore(t)
 	_, err := p.pool.Exec(context.Background(),
-		`TRUNCATE tenant_usage, api_keys, tenant_watched_contracts,
+		`TRUNCATE tenant_usage, tenant_api_keys, tenant_watched_contracts,
 		          tenant_contract_grants, tenants RESTART IDENTITY CASCADE`)
 	require.NoError(t, err)
-	// Re-seed what migration 0008 inserts, since the truncate above removed it.
+	// Re-seed what migration 0016 inserts, since the truncate above removed it.
 	_, err = p.pool.Exec(context.Background(),
 		`INSERT INTO tenants (name, wildcard, is_admin, enabled)
 		 VALUES ('default', true, true, true)`)
@@ -255,22 +255,22 @@ func TestWatchedContracts_UnionAndRefcounting(t *testing.T) {
 	two := mustTenant(t, p, "two")
 
 	// The operator's global list still counts.
-	require.NoError(t, p.AddWatchedContract(ctx, contractC))
+	require.NoError(t, p.AddWatchedContract(ctx, WatchedContract{ContractID: contractC}))
 
-	require.NoError(t, p.AddTenantWatchedContract(ctx, one, contractA, 0))
-	require.NoError(t, p.AddTenantWatchedContract(ctx, two, contractA, 0))
-	require.NoError(t, p.AddTenantWatchedContract(ctx, two, contractB, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, one, "", contractA, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, two, "", contractA, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, two, "", contractB, 0))
 
 	assert.Equal(t, []string{contractA, contractB, contractC}, watchedContractIDs(t, p),
 		"a contract two tenants both want appears once")
 
 	// One tenant drops the shared contract; the other still needs it.
-	require.NoError(t, p.RemoveTenantWatchedContract(ctx, one.ID, contractA))
+	require.NoError(t, p.RemoveTenantWatchedContract(ctx, one.ID, "", contractA))
 	assert.Contains(t, watchedContractIDs(t, p), contractA,
 		"a contract another tenant still watches must keep being ingested")
 
 	// The last tenant drops it: now it leaves the union.
-	require.NoError(t, p.RemoveTenantWatchedContract(ctx, two.ID, contractA))
+	require.NoError(t, p.RemoveTenantWatchedContract(ctx, two.ID, "", contractA))
 	watched := watchedContractIDs(t, p)
 	assert.NotContains(t, watched, contractA)
 	assert.Contains(t, watched, contractB)
@@ -285,9 +285,9 @@ func TestDeleteTenant_ReleasesWatchClaims(t *testing.T) {
 
 	one := mustTenant(t, p, "one")
 	two := mustTenant(t, p, "two")
-	require.NoError(t, p.AddTenantWatchedContract(ctx, one, contractA, 0))
-	require.NoError(t, p.AddTenantWatchedContract(ctx, one, contractB, 0))
-	require.NoError(t, p.AddTenantWatchedContract(ctx, two, contractB, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, one, "", contractA, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, one, "", contractB, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, two, "", contractB, 0))
 
 	require.NoError(t, p.DeleteTenant(ctx, one.ID))
 
@@ -310,12 +310,12 @@ func TestWatchedContracts_Quotas(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, contractA, 0))
-		err = p.AddTenantWatchedContract(ctx, tenant, contractB, 0)
+		require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "", contractA, 0))
+		err = p.AddTenantWatchedContract(ctx, tenant, "", contractB, 0)
 		assert.ErrorIs(t, err, ErrQuotaExceeded)
 
 		// Re-adding something already held stays idempotent at the cap.
-		assert.NoError(t, p.AddTenantWatchedContract(ctx, tenant, contractA, 0))
+		assert.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "", contractA, 0))
 	})
 
 	t.Run("the instance cap bounds the union", func(t *testing.T) {
@@ -323,24 +323,24 @@ func TestWatchedContracts_Quotas(t *testing.T) {
 		one := mustTenant(t, p, "one")
 		two := mustTenant(t, p, "two")
 
-		require.NoError(t, p.AddTenantWatchedContract(ctx, one, contractA, 2))
-		require.NoError(t, p.AddTenantWatchedContract(ctx, one, contractB, 2))
+		require.NoError(t, p.AddTenantWatchedContract(ctx, one, "", contractA, 2))
+		require.NoError(t, p.AddTenantWatchedContract(ctx, one, "", contractB, 2))
 
-		err := p.AddTenantWatchedContract(ctx, two, contractC, 2)
+		err := p.AddTenantWatchedContract(ctx, two, "", contractC, 2)
 		assert.ErrorIs(t, err, ErrQuotaExceeded, "a third distinct contract exceeds the cap")
 
 		// A contract already in the union costs nothing to join, because
 		// the cap bounds ingestion cost and that contract is already polled.
-		assert.NoError(t, p.AddTenantWatchedContract(ctx, two, contractA, 2))
+		assert.NoError(t, p.AddTenantWatchedContract(ctx, two, "", contractA, 2))
 	})
 
 	t.Run("no cap means unlimited", func(t *testing.T) {
 		p := testTenantStore(t)
 		tenant := mustTenant(t, p, "uncapped")
 		for _, c := range []string{contractA, contractB, contractC} {
-			require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, c, 0))
+			require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "", c, 0))
 		}
-		watched, err := p.ListTenantWatchedContracts(ctx, tenant.ID)
+		watched, err := p.ListTenantWatchedContracts(ctx, tenant.ID, "")
 		require.NoError(t, err)
 		assert.Len(t, watched, 3)
 	})
@@ -354,7 +354,7 @@ func TestWatchingDoesNotGrantAccess(t *testing.T) {
 	ctx := context.Background()
 
 	tenant := mustTenant(t, p, "watcher")
-	require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, contractA, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "", contractA, 0))
 
 	sc, err := p.ScopeForTenant(ctx, tenant)
 	require.NoError(t, err)
@@ -368,19 +368,42 @@ func TestWatchingDoesNotGrantAccess(t *testing.T) {
 	assert.Empty(t, got)
 }
 
-func TestAPIKeys(t *testing.T) {
+func TestWatchedContracts_MultiNetwork(t *testing.T) {
+	p := testTenantStore(t)
+	ctx := context.Background()
+
+	tenant := mustTenant(t, p, "multi-net")
+	require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "mainnet", contractA, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "testnet", contractA, 0))
+	require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "testnet", contractB, 0))
+
+	mainnetWatched, err := p.ListTenantWatchedContracts(ctx, tenant.ID, "mainnet")
+	require.NoError(t, err)
+	assert.Equal(t, []string{contractA}, mainnetWatched)
+
+	testnetWatched, err := p.ListTenantWatchedContracts(ctx, tenant.ID, "testnet")
+	require.NoError(t, err)
+	assert.Equal(t, []string{contractA, contractB}, testnetWatched)
+
+	require.NoError(t, p.RemoveTenantWatchedContract(ctx, tenant.ID, "testnet", contractA))
+	mainnetWatched, err = p.ListTenantWatchedContracts(ctx, tenant.ID, "mainnet")
+	require.NoError(t, err)
+	assert.Equal(t, []string{contractA}, mainnetWatched, "mainnet watch is preserved when testnet watch is removed")
+}
+
+func TestTenantAPIKeys(t *testing.T) {
 	p := testTenantStore(t)
 	ctx := context.Background()
 	tenant := mustTenant(t, p, "keyed")
 
 	digest := []byte("0123456789abcdef0123456789abcdef")
-	key, err := p.CreateAPIKey(ctx, tenant.ID, "primary", "PREFIX0000000001", digest)
+	key, err := p.CreateTenantAPIKey(ctx, tenant.ID, "primary", "PREFIX0000000001", digest)
 	require.NoError(t, err)
 	assert.Equal(t, tenant.ID, key.TenantID)
 	assert.Nil(t, key.RevokedAt)
 
 	t.Run("lookup returns the digest and tenant", func(t *testing.T) {
-		got, gotDigest, gotTenant, err := p.LookupAPIKey(ctx, "PREFIX0000000001")
+		got, gotDigest, gotTenant, err := p.LookupTenantAPIKey(ctx, "PREFIX0000000001")
 		require.NoError(t, err)
 		assert.Equal(t, key.ID, got.ID)
 		assert.Equal(t, digest, gotDigest)
@@ -389,57 +412,57 @@ func TestAPIKeys(t *testing.T) {
 	})
 
 	t.Run("an unknown prefix is not found", func(t *testing.T) {
-		_, _, _, err := p.LookupAPIKey(ctx, "NOSUCHPREFIX0000")
+		_, _, _, err := p.LookupTenantAPIKey(ctx, "NOSUCHPREFIX0000")
 		assert.ErrorIs(t, err, ErrNotFound)
 	})
 
 	t.Run("a revoked key stops resolving", func(t *testing.T) {
-		require.NoError(t, p.RevokeAPIKey(ctx, key.ID))
-		_, _, _, err := p.LookupAPIKey(ctx, "PREFIX0000000001")
+		require.NoError(t, p.RevokeTenantAPIKey(ctx, key.ID))
+		_, _, _, err := p.LookupTenantAPIKey(ctx, "PREFIX0000000001")
 		assert.ErrorIs(t, err, ErrNotFound,
 			"revocation must be enforced by the lookup, not by the caller remembering to check")
 
 		// The row survives for audit.
-		keys, err := p.ListAPIKeys(ctx, tenant.ID)
+		keys, err := p.ListTenantAPIKeys(ctx, tenant.ID)
 		require.NoError(t, err)
 		require.Len(t, keys, 1)
 		assert.NotNil(t, keys[0].RevokedAt)
 	})
 
 	t.Run("revoking twice reports not found", func(t *testing.T) {
-		assert.ErrorIs(t, p.RevokeAPIKey(ctx, key.ID), ErrNotFound)
+		assert.ErrorIs(t, p.RevokeTenantAPIKey(ctx, key.ID), ErrNotFound)
 	})
 
 	t.Run("deleting a tenant cascades its keys", func(t *testing.T) {
 		victim := mustTenant(t, p, "doomed")
-		_, err := p.CreateAPIKey(ctx, victim.ID, "k", "PREFIX0000000002", digest)
+		_, err := p.CreateTenantAPIKey(ctx, victim.ID, "k", "PREFIX0000000002", digest)
 		require.NoError(t, err)
 
 		require.NoError(t, p.DeleteTenant(ctx, victim.ID))
-		_, _, _, err = p.LookupAPIKey(ctx, "PREFIX0000000002")
+		_, _, _, err = p.LookupTenantAPIKey(ctx, "PREFIX0000000002")
 		assert.ErrorIs(t, err, ErrNotFound)
 	})
 }
 
 // The bootstrap path runs on every startup, so it must be idempotent.
-func TestCreateAPIKeyIfAbsent_IsIdempotent(t *testing.T) {
+func TestCreateTenantAPIKeyIfAbsent_IsIdempotent(t *testing.T) {
 	p := testTenantStore(t)
 	ctx := context.Background()
 	tenant := mustTenant(t, p, "bootstrapped")
 
 	first := []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	require.NoError(t, p.CreateAPIKeyIfAbsent(ctx, tenant.ID, "bootstrap", "BOOTPREFIX000001", first))
-	require.NoError(t, p.CreateAPIKeyIfAbsent(ctx, tenant.ID, "bootstrap", "BOOTPREFIX000001", first))
+	require.NoError(t, p.CreateTenantAPIKeyIfAbsent(ctx, tenant.ID, "bootstrap", "BOOTPREFIX000001", first))
+	require.NoError(t, p.CreateTenantAPIKeyIfAbsent(ctx, tenant.ID, "bootstrap", "BOOTPREFIX000001", first))
 
-	keys, err := p.ListAPIKeys(ctx, tenant.ID)
+	keys, err := p.ListTenantAPIKeys(ctx, tenant.ID)
 	require.NoError(t, err)
 	assert.Len(t, keys, 1, "a restart must not accumulate duplicate bootstrap keys")
 
 	t.Run("rotating the configured value takes effect", func(t *testing.T) {
 		second := []byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-		require.NoError(t, p.CreateAPIKeyIfAbsent(ctx, tenant.ID, "bootstrap", "BOOTPREFIX000001", second))
+		require.NoError(t, p.CreateTenantAPIKeyIfAbsent(ctx, tenant.ID, "bootstrap", "BOOTPREFIX000001", second))
 
-		_, digest, _, err := p.LookupAPIKey(ctx, "BOOTPREFIX000001")
+		_, digest, _, err := p.LookupTenantAPIKey(ctx, "BOOTPREFIX000001")
 		require.NoError(t, err)
 		assert.Equal(t, second, digest)
 	})

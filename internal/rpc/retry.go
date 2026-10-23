@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sorotrail/sorotrail/internal/metrics"
+	"github.com/sorotrail/sorotrail/internal/requestid"
 )
 
 // RetryConfig controls the retry/backoff behaviour applied to every RPC call
@@ -92,11 +93,16 @@ func (c *RetryClient) doWithRetry(ctx context.Context, method string, fn func(co
 			// first signal that the upstream is slow or throttling.
 			metrics.RPCRetriesTotal.WithLabelValues(method, source).Inc()
 			metrics.RPCBackoffSeconds.WithLabelValues(method).Add(wait.Seconds())
-			c.log().Debug("rpc retry scheduled",
+			// A retry means the upstream call failed; tagging the line with
+			// the request or job that asked for it lets an incident start
+			// from the client-visible failure and walk down to the RPC hop.
+			attrs := requestid.Attrs(ctx)
+			attrs = append(attrs,
 				"attempt", attempt,
 				"wait", wait.String(),
 				"source", source,
 				"error", err.Error())
+			c.log().Debug("rpc retry scheduled", attrs...)
 			if !sleepCtx(ctx, wait) {
 				return ctx.Err()
 			}
@@ -174,7 +180,7 @@ func isRetryable(err error) bool {
 		return rpcErr.Code == 0
 	}
 	// HTTP transport errors (connection refused, timeout, EOF) are retryable.
-	return isTransientHTTP(err)
+	return IsTransientHTTP(err)
 }
 
 // rpcErrFromErr unwraps an *Error from the error chain.
@@ -182,54 +188,22 @@ func rpcErrFromErr(err error) *Error {
 	if err == nil {
 		return nil
 	}
-	type causer interface{ Unwrap() error }
-	for e := err; e != nil; {
-		if rpcErr, ok := e.(*Error); ok {
-			return rpcErr
-		}
-		u, ok := e.(causer)
-		if !ok {
-			break
-		}
-		e = u.Unwrap()
+	// errors.As walks the same chain the hand-rolled unwrap loop did, and
+	// it also understands the multi-error chains errors.Join builds.
+	var rpcErr *Error
+	if errors.As(err, &rpcErr) {
+		return rpcErr
 	}
 	return nil
 }
 
+// isContextErr reports whether err is the caller's context giving up. The
+// comparison goes through errors.Is because the provider's error arrives
+// wrapped: the retry layer has to see a deadline or a cancellation through
+// the transport's own wrapping, or it would classify the caller's own
+// deadline as a transient transport failure and keep retrying it.
 func isContextErr(err error) bool {
-	return err == context.Canceled || err == context.DeadlineExceeded
-}
-
-func isTransientHTTP(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	for _, frag := range []string{
-		"connection reset",
-		"connection refused",
-		"EOF",
-		"timeout",
-		"temporary failure",
-		"no such host",
-	} {
-		if containsStr(s, frag) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsStr(haystack, needle string) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

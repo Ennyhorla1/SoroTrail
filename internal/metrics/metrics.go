@@ -101,14 +101,25 @@ var (
 		Buckets: prometheus.DefBuckets,
 	})
 
-	// DBQueryDuration records the wall-clock duration of a database query
-	// (SELECT operations). Labelled by operation (e.g. "list_events",
-	// "count_events", "get_contract").
+	// DBQueryDuration records the wall-clock duration of a store operation.
+	// It is labelled by operation (the Store method name, a bounded set) and
+	// covers reads and writes alike, so a slow database is attributable to a
+	// specific operation rather than showing up only as a slow API.
 	DBQueryDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "sorotrail_db_query_duration_seconds",
-		Help:    "Database query duration in seconds, labelled by operation.",
+		Help:    "Store operation duration in seconds, labelled by operation.",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"operation"})
+
+	// DBOperationsTotal counts every store operation by method name and
+	// outcome. The operation label is a fixed enum of Store method names and
+	// never a contract id, so cardinality is bounded. Errors are counted
+	// separately from successes so a failing backend is a direct query rather
+	// than something inferred by subtracting histograms.
+	DBOperationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "sorotrail_db_operations_total",
+		Help: "Total store operations, labelled by operation and outcome (success | error).",
+	}, []string{"operation", "outcome"})
 
 	// IngestionLag is the number of ledgers the indexer is behind the
 	// Stellar RPC chain head. Updated after every ingestion pass that
@@ -162,6 +173,16 @@ var (
 		Help: "Total seconds spent throttling event writes under backpressure.",
 	})
 	// ---- End batch instrumentation ----
+
+	// SpecInvalidationsReceived counts the spec-cache invalidations this
+	// process applied because another replica said the contract's decoded
+	// shape changed. A non-zero value proves the cross-replica fan-out is
+	// working; a replica that never invalidates anything while its peers
+	// are changing specs is serving stale decodes.
+	SpecInvalidationsReceived = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "sorotrail_spec_invalidations_received_total",
+		Help: "Total number of spec cache invalidations received from other replicas.",
+	})
 )
 
 func init() {
@@ -171,6 +192,7 @@ func init() {
 		RPCCallLatency,
 		DBWriteLatency,
 		DBQueryDuration,
+		DBOperationsTotal,
 		IngestionLag,
 		EventBatchWrites,
 		EventBatchSize,
@@ -181,6 +203,7 @@ func init() {
 		RPCFailoversTotal,
 		RPCCircuitBreakerState,
 		RPCProviderState,
+		SpecInvalidationsReceived,
 	)
 }
 

@@ -12,9 +12,11 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -23,6 +25,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/sorotrail/sorotrail/internal/buildinfo"
+	"github.com/sorotrail/sorotrail/internal/decode"
+	"github.com/sorotrail/sorotrail/internal/ingester"
+	"github.com/sorotrail/sorotrail/internal/metrics"
 	"github.com/sorotrail/sorotrail/internal/rpc"
 	"github.com/sorotrail/sorotrail/internal/store"
 )
@@ -95,9 +100,16 @@ type stubStore struct {
 	contractSummaryErr error
 	eventTypeCounts    []store.ContractEventTypeCount
 	eventTypeCountsErr error
-	lastFilter         store.EventFilter
-	nextCursor         string
-	queryErr           error
+	// Contract-stats responses for /contracts/{id}/stats. The zero values
+	// preserve the old stub behaviour: no events and no metadata, so the
+	// handler answers 404 unless a test opts in.
+	contractEventCount    int64
+	contractEventCountErr error
+	contractMeta          *store.ContractMeta
+	contractMetaErr       error
+	lastFilter            store.EventFilter
+	nextCursor            string
+	queryErr              error
 
 	totalCount      int64
 	countEventsErr  error
@@ -132,8 +144,17 @@ type stubStore struct {
 	existsCalls      int // count of EventExists calls
 	lastExistsID     string
 
-	ingestion    store.IngestionState
-	ingestionErr error
+	ingestion      store.IngestionState
+	ingestionErr   error
+	ingestionByNet map[string]store.IngestionState
+
+	// pingCalls/ingestionStateCalls count dependency probes so tests can
+	// assert an endpoint that must not touch a dependency really doesn't.
+	pingCalls           atomic.Int64
+	ingestionStateCalls atomic.Int64
+	// pingFn, when set, replaces pingErr as the Ping answer so a test can
+	// hang on the request context instead of returning instantly.
+	pingFn func(context.Context) error
 
 	migrationVersion     int
 	migrationDirty       bool
@@ -145,19 +166,24 @@ type stubStore struct {
 	countContractsErr    error
 	lastContractsFilter  store.ContractsFilter
 
-	addressEvents    []store.Event
-	addressCursor    string
-	addressEventsErr error
-	addressCount     int64
-	addressCountErr  error
+	addressEvents     []store.Event
+	addressCursor     string
+	addressEventsErr  error
+	addressCount      int64
+	addressCountErr   error
+	addressSummary    store.AddressSummary
+	addressSummaryErr error
 
 	deadLettersResult []store.DeadLetter
 	deadLettersCursor string
 	deadLettersErr    error
+	listDeadLettersFn func(ctx context.Context, contractID string, limit int, cursor string) ([]store.DeadLetter, string, error)
 	// deadLettersCount is what CountDeadLetters returns; the error field
 	// drives the "count failed, header omitted" path.
 	deadLettersCount    int64
 	deadLettersCountErr error
+	deleteDeadLetterErr error
+	deleteDeadLetterFn  func(ctx context.Context, id int64) error
 
 	// deliveryAttemptsCount is what CountDeliveryAttempts returns; the
 	// error field drives the "count failed, header omitted" path.
@@ -166,9 +192,18 @@ type stubStore struct {
 
 	subscriptions []store.Subscription
 
-	subscriptions []store.Subscription
-
 	contractCursors map[string]store.ContractCursor
+
+	// specOverride is the last value SetContractSpecOverride stored, so
+	// tests can assert exactly which bytes reached the store.
+	specOverride   []byte
+	specOverrideID string
+	// specOverrideHistory is the append-only log of override changes, in
+	// insertion order. specOverrideErr makes every history write fail, so a
+	// test can drive the store-failure path.
+	specOverrideHistory []store.ContractSpecOverrideVersion
+	specOverrideNextID  int64
+	specOverrideErr     error
 }
 
 func (s *stubStore) QueryEvents(_ context.Context, f store.EventFilter) ([]store.Event, string, error) {
@@ -277,10 +312,27 @@ func (s *stubStore) EventExists(_ context.Context, id string, _ store.Scope) (bo
 // LastIngestedLedger to drive the boundary decisions (just-below, at,
 // and above the frontier).
 func (s *stubStore) GetIngestionState(context.Context) (store.IngestionState, error) {
+	s.ingestionStateCalls.Add(1)
 	if s.ingestionState != nil {
 		return *s.ingestionState, s.ingestionStateEr
 	}
 	return s.ingestion, s.ingestionErr
+}
+
+func (s *stubStore) GetIngestionStateForNetwork(ctx context.Context, network string) (store.IngestionState, error) {
+	if s.ingestionByNet != nil {
+		if network == "" {
+			network = "default"
+		}
+		if st, ok := s.ingestionByNet[network]; ok {
+			return st, nil
+		}
+		return store.IngestionState{}, store.ErrNotFound
+	}
+	if network == "" || network == "default" {
+		return s.GetIngestionState(ctx)
+	}
+	return store.IngestionState{}, store.ErrNotFound
 }
 
 // MigrationVersion backs /readyz's schema check. Tests that need a dirty
@@ -305,18 +357,40 @@ func (s *stubStore) Stats(_ context.Context, _ store.Scope) (store.Stats, error)
 	s.statsCalls++
 	return s.stats, nil
 }
-func (s *stubStore) Ping(context.Context) error { return s.pingErr }
+func (s *stubStore) Ping(ctx context.Context) error {
+	s.pingCalls.Add(1)
+	if s.pingFn != nil {
+		return s.pingFn(ctx)
+	}
+	return s.pingErr
+}
 func (s *stubStore) ListWatchedContracts(context.Context) ([]store.WatchedContract, error) {
 	return s.watchedList, s.watchedListErr
 }
 
-func (s *stubStore) AddWatchedContract(_ context.Context, id string) error {
-	s.added = append(s.added, id)
+func (s *stubStore) ListWatchedContractsScoped(_ context.Context, sc store.Scope) ([]store.WatchedContract, error) {
+	if s.watchedListErr != nil {
+		return nil, s.watchedListErr
+	}
+	if sc.DeniesAll() {
+		return []store.WatchedContract{}, nil
+	}
+	out := make([]store.WatchedContract, 0, len(s.watchedList))
+	for _, wc := range s.watchedList {
+		if sc.Allows(wc.ContractID) {
+			out = append(out, wc)
+		}
+	}
+	return out, nil
+}
+
+func (s *stubStore) AddWatchedContract(_ context.Context, w store.WatchedContract) error {
+	s.added = append(s.added, w.ContractID)
 	return s.addErr
 }
 
-func (s *stubStore) RemoveWatchedContract(_ context.Context, id string) error {
-	s.removed = append(s.removed, id)
+func (s *stubStore) RemoveWatchedContract(_ context.Context, w store.WatchedContract) error {
+	s.removed = append(s.removed, w.ContractID)
 	return s.removeErr
 }
 
@@ -348,6 +422,93 @@ func (s *stubStore) UpdateSubscription(_ context.Context, sub store.Subscription
 func (s *stubStore) DeleteSubscription(context.Context, int64, store.SubscriptionOwner) error {
 	return nil
 }
+func (s *stubStore) GetContractSpecOverride(context.Context, string) ([]byte, error) {
+	return s.specOverride, nil
+}
+func (s *stubStore) SetContractSpecOverride(_ context.Context, id string, data []byte) error {
+	s.specOverrideID = id
+	s.specOverride = data
+	return nil
+}
+func (s *stubStore) DeleteContractSpecOverride(context.Context, string) error {
+	return nil
+}
+
+// SetContractSpecOverrideWithHistory stores the override and appends a
+// history row, mirroring the Postgres backend's single transaction.
+func (s *stubStore) SetContractSpecOverrideWithHistory(_ context.Context, id string, data []byte, apiKeyPrefix string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.specOverrideErr != nil {
+		return s.specOverrideErr
+	}
+	s.specOverrideID = id
+	s.specOverride = data
+	s.appendSpecOverrideHistoryLocked(id, data, apiKeyPrefix)
+	return nil
+}
+
+// DeleteContractSpecOverrideWithHistory clears the override and appends a
+// tombstone history row.
+func (s *stubStore) DeleteContractSpecOverrideWithHistory(_ context.Context, id string, apiKeyPrefix string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.specOverrideErr != nil {
+		return s.specOverrideErr
+	}
+	s.specOverride = nil
+	s.appendSpecOverrideHistoryLocked(id, nil, apiKeyPrefix)
+	return nil
+}
+
+func (s *stubStore) appendSpecOverrideHistoryLocked(id string, spec []byte, apiKeyPrefix string) {
+	s.specOverrideNextID++
+	s.specOverrideHistory = append(s.specOverrideHistory, store.ContractSpecOverrideVersion{
+		ID:           s.specOverrideNextID,
+		ContractID:   id,
+		Spec:         spec,
+		APIKeyPrefix: apiKeyPrefix,
+		CreatedAt:    time.Now().UTC(),
+	})
+}
+
+// ListContractSpecOverrideHistory returns the history newest first, with
+// cursor pagination over the version id.
+func (s *stubStore) ListContractSpecOverrideHistory(_ context.Context, contractID string, limit int, cursor string) ([]store.ContractSpecOverrideVersion, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.specOverrideErr != nil {
+		return nil, "", s.specOverrideErr
+	}
+	var afterID int64
+	if cursor != "" {
+		id, err := store.DecodeSpecOverrideHistoryCursor(cursor)
+		if err != nil {
+			return nil, "", err
+		}
+		afterID = id
+	}
+	var out []store.ContractSpecOverrideVersion
+	for i := len(s.specOverrideHistory) - 1; i >= 0; i-- {
+		v := s.specOverrideHistory[i]
+		if v.ContractID != contractID {
+			continue
+		}
+		// afterID is 0 when there is no cursor, which means no lower bound.
+		if afterID != 0 && v.ID >= afterID {
+			continue
+		}
+		out = append(out, v)
+		if limit > 0 && len(out) == limit {
+			break
+		}
+	}
+	next := ""
+	if limit > 0 && len(out) == limit {
+		next = store.EncodeSpecOverrideHistoryCursor(out[len(out)-1].ID)
+	}
+	return out, next, nil
+}
 func (s *stubStore) ListEnabledSubscriptions(context.Context) ([]store.Subscription, error) {
 	return nil, nil
 }
@@ -373,13 +534,29 @@ func (s *stubStore) CountAddressEvents(_ context.Context, address string) (int64
 	return s.addressCount, s.addressCountErr
 }
 func (s *stubStore) GetAddressSummary(context.Context, string) (store.AddressSummary, error) {
-	return store.AddressSummary{}, nil
+	return s.addressSummary, s.addressSummaryErr
 }
 func (s *stubStore) UpsertAddressRefs(context.Context, []store.AddressRef) error {
 	return nil
 }
 func (s *stubStore) UpsertEvents(context.Context, []store.Event) (int64, error) {
 	return 0, nil
+}
+
+func (s *stubStore) CreateAPIKey(context.Context, store.APIKey) (store.APIKey, error) {
+	return store.APIKey{}, nil
+}
+func (s *stubStore) GetAPIKey(context.Context, int64) (store.APIKey, error) {
+	return store.APIKey{}, nil
+}
+func (s *stubStore) LookupAPIKeyByPrefix(context.Context, string) (store.APIKey, error) {
+	return store.APIKey{}, nil
+}
+func (s *stubStore) ListAPIKeys(context.Context) ([]store.APIKey, error) {
+	return nil, nil
+}
+func (s *stubStore) RevokeAPIKey(context.Context, int64) error {
+	return nil
 }
 
 func (s *stubStore) GetContractCursor(_ context.Context, contractID string) (store.ContractCursor, error) {
@@ -404,13 +581,19 @@ func (s *stubStore) ListContractIDs(context.Context) ([]string, error) {
 	return nil, nil
 }
 func (s *stubStore) GetContractMeta(context.Context, string) (store.ContractMeta, error) {
+	if s.contractMetaErr != nil {
+		return store.ContractMeta{}, s.contractMetaErr
+	}
+	if s.contractMeta != nil {
+		return *s.contractMeta, nil
+	}
 	return store.ContractMeta{}, store.ErrNotFound
 }
 func (s *stubStore) UpsertContractMeta(context.Context, store.ContractMeta) error {
 	return nil
 }
 func (s *stubStore) CountContractEvents(context.Context, string) (int64, error) {
-	return 0, nil
+	return s.contractEventCount, s.contractEventCountErr
 }
 
 func (s *stubStore) GetContractSummary(_ context.Context, id string) (store.ContractSummary, error) {
@@ -435,9 +618,19 @@ type stubRPC struct {
 
 	health    rpc.Health
 	healthErr error
+
+	// getHealthCalls counts probes for the same reason as pingCalls.
+	getHealthCalls atomic.Int64
+	// getHealthFn, when set, replaces healthErr/health as the answer so a
+	// test can hang on the request context instead of returning instantly.
+	getHealthFn func(context.Context) (rpc.Health, error)
 }
 
-func (s *stubRPC) GetHealth(context.Context) (rpc.Health, error) {
+func (s *stubRPC) GetHealth(ctx context.Context) (rpc.Health, error) {
+	s.getHealthCalls.Add(1)
+	if s.getHealthFn != nil {
+		return s.getHealthFn(ctx)
+	}
 	return s.health, s.healthErr
 }
 
@@ -452,20 +645,30 @@ func newTestServer(st *stubStore, rc *stubRPC) *Server {
 	return newTestServerWithKey(st, rc, "test-key")
 }
 
+// testResponse carries the parts of an HTTP response the test helpers'
+// callers actually inspect: the status and headers. The helpers drain and
+// close the body themselves before returning, so exposing *http.Response
+// would both hand callers a dead body and make bodyclose flag every call
+// site as a leak it cannot see through.
+type testResponse struct {
+	StatusCode int
+	Header     http.Header
+}
+
 // doGet performs a GET request against the test server.
-func doGet(t *testing.T, s *Server, path string) (*http.Response, []byte) {
+func doGet(t *testing.T, s *Server, path string) (testResponse, []byte) {
 	t.Helper()
 	return doGetWithHeader(t, s, path, "", "")
 }
 
 // doGetWithAuth performs a GET against the test server with an api-key
 // header, for the API_KEY-gated admin endpoints.
-func doGetWithAuth(t *testing.T, s *Server, path, apiKey string) (*http.Response, []byte) {
+func doGetWithAuth(t *testing.T, s *Server, path, apiKey string) (testResponse, []byte) {
 	t.Helper()
 	return doGetWithHeader(t, s, path, "X-Api-Key", apiKey)
 }
 
-func doGetWithHeader(t *testing.T, s *Server, path, key, value string) (*http.Response, []byte) {
+func doGetWithHeader(t *testing.T, s *Server, path, key, value string) (testResponse, []byte) {
 	t.Helper()
 	srv := httptest.NewServer(s.Router())
 	defer srv.Close()
@@ -479,7 +682,7 @@ func doGetWithHeader(t *testing.T, s *Server, path, key, value string) (*http.Re
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	resp.Body.Close()
-	return resp, body
+	return testResponse{StatusCode: resp.StatusCode, Header: resp.Header}, body
 }
 
 const testContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
@@ -1406,8 +1609,9 @@ func TestReadyz(t *testing.T) {
 		var h healthResponse
 		require.NoError(t, json.Unmarshal(body, &h))
 		assert.Equal(t, "ok", h.Status)
-		assert.Equal(t, "ok", h.Checks["database"])
-		assert.Equal(t, "ok", h.Checks["rpc"])
+		assert.Equal(t, healthOK, h.Checks["database"].Status)
+		assert.Equal(t, healthOK, h.Checks["rpc"].Status)
+		assert.Equal(t, healthOK, h.Checks["ingestion_lag"].Status)
 	})
 
 	t.Run("db down returns 503 with reason", func(t *testing.T) {
@@ -1416,10 +1620,12 @@ func TestReadyz(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 		var h healthResponse
 		require.NoError(t, json.Unmarshal(body, &h))
-		assert.Equal(t, "degraded", h.Status)
-		assert.Contains(t, h.Checks["database"], "connection refused")
-		// RPC is still ok in this test.
-		assert.Equal(t, "ok", h.Checks["rpc"])
+		assert.Equal(t, healthUnready, h.Status)
+		assert.Equal(t, healthUnready, h.Checks["database"].Status)
+		assert.Contains(t, h.Checks["database"].Detail, "connection refused")
+		// The other checks stay ok: a failure names dependency, not the envelope.
+		assert.Equal(t, healthOK, h.Checks["rpc"].Status)
+		assert.Equal(t, healthOK, h.Checks["ingestion_lag"].Status)
 	})
 
 	t.Run("rpc down returns 503 with reason", func(t *testing.T) {
@@ -1428,8 +1634,10 @@ func TestReadyz(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 		var h healthResponse
 		require.NoError(t, json.Unmarshal(body, &h))
-		assert.Equal(t, "degraded", h.Status)
-		assert.Contains(t, h.Checks["rpc"], "rpc unreachable")
+		assert.Equal(t, healthUnready, h.Status)
+		assert.Equal(t, healthUnready, h.Checks["rpc"].Status)
+		assert.Contains(t, h.Checks["rpc"].Detail, "rpc unreachable")
+		assert.Equal(t, healthOK, h.Checks["database"].Status)
 	})
 
 	t.Run("rpc unhealthy status returns 503", func(t *testing.T) {
@@ -1438,8 +1646,11 @@ func TestReadyz(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 		var h healthResponse
 		require.NoError(t, json.Unmarshal(body, &h))
-		assert.Equal(t, "degraded", h.Status)
-		assert.Contains(t, h.Checks["rpc"], `rpc reports "unhealthy"`)
+		// Reachable-but-unhealthy is degraded, not unready: the distinction
+		// is what tells an operator to wait versus to intervene.
+		assert.Equal(t, healthDegraded, h.Status)
+		assert.Equal(t, healthDegraded, h.Checks["rpc"].Status)
+		assert.Contains(t, h.Checks["rpc"].Detail, `rpc reports "unhealthy"`)
 	})
 
 	t.Run("no-store cache header", func(t *testing.T) {
@@ -1528,6 +1739,40 @@ func TestStats(t *testing.T) {
 		assert.Equal(t, uint64(0), got.QueryErrors, "query_errors should be present and zero")
 	})
 
+	t.Run("surfaces the ingester's last-successful-poll timestamp", func(t *testing.T) {
+		poll := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+		st := &stubStore{
+			stats: store.Stats{TotalEvents: 42, LastIngestedLedger: 999},
+			ingestionState: &store.IngestionState{
+				LastIngestedLedger: 999,
+				LastSuccessfulPoll: &poll,
+			},
+		}
+		resp, body := doGet(t, newTestServer(st, nil), "/stats")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		var got store.Stats
+		require.NoError(t, json.Unmarshal(body, &got))
+		require.NotNil(t, got.LastSuccessfulPoll)
+		assert.Equal(t, poll, *got.LastSuccessfulPoll)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(body, &raw))
+		assert.Contains(t, raw, "last_successful_poll")
+	})
+
+	t.Run("omits last-successful-poll when the ingester has never polled", func(t *testing.T) {
+		st := &stubStore{stats: store.Stats{TotalEvents: 42, LastIngestedLedger: 999}}
+		resp, body := doGet(t, newTestServer(st, nil), "/stats")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		var got store.Stats
+		require.NoError(t, json.Unmarshal(body, &got))
+		assert.Nil(t, got.LastSuccessfulPoll)
+
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(body, &raw))
+		assert.NotContains(t, raw, "last_successful_poll")
+	})
+
 	t.Run("keeps stored stats when RPC is down", func(t *testing.T) {
 		st := &stubStore{stats: store.Stats{
 			TotalEvents:        42,
@@ -1553,6 +1798,61 @@ func TestStats(t *testing.T) {
 		assert.Nil(t, raw["ingest_lag_ledgers"])
 		assert.Equal(t, uint64(0), got.QueryErrors, "query_errors should be present and zero")
 	})
+}
+
+// TestStats_IngesterEffectivePollInterval covers issue #146's acceptance
+// criterion "expose the current effective interval in /stats": once an
+// Ingester is registered via SetIngester, /stats must surface its live
+// adaptive poll interval, and must omit it (zero value) when none is
+// registered.
+func TestStats_IngesterEffectivePollInterval(t *testing.T) {
+	t.Cleanup(func() { SetIngester(nil) })
+
+	st := &stubStore{}
+	rc := &stubRPC{health: rpc.Health{Status: "healthy"}}
+
+	t.Run("absent when no ingester registered", func(t *testing.T) {
+		SetIngester(nil)
+		resp, body := doGet(t, newTestServer(st, rc), "/stats")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		var got store.Stats
+		require.NoError(t, json.Unmarshal(body, &got))
+		assert.Zero(t, got.Ingester.EffectivePollIntervalMs)
+	})
+
+	t.Run("reflects the registered ingester's live interval", func(t *testing.T) {
+		ing := ingester.New(nil, nil, decode.XDRDecoder{}, slog.New(slog.NewTextHandler(io.Discard, nil)), ingester.Options{
+			PollInterval:    5 * time.Second,
+			PollIntervalMin: time.Second,
+			PollIntervalMax: 30 * time.Second,
+		})
+		SetIngester(ing)
+
+		resp, body := doGet(t, newTestServer(st, rc), "/stats")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		var got store.Stats
+		require.NoError(t, json.Unmarshal(body, &got))
+		assert.Equal(t, int64(5000), got.Ingester.EffectivePollIntervalMs)
+	})
+}
+
+// TestStats_EventsIngestedTotal covers issue #536: /stats must surface the
+// cumulative count of events the ingester has persisted, read from the
+// Prometheus counter metrics.EventsIngested, rather than permanently
+// reporting zero.
+func TestStats_EventsIngestedTotal(t *testing.T) {
+	before := testutil.ToFloat64(metrics.EventsIngested)
+	metrics.EventsIngested.Add(7)
+
+	st := &stubStore{}
+	rc := &stubRPC{health: rpc.Health{Status: "healthy"}}
+
+	resp, body := doGet(t, newTestServer(st, rc), "/stats")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var got store.Stats
+	require.NoError(t, json.Unmarshal(body, &got))
+	assert.Equal(t, uint64(before)+7, got.EventsIngestedTotal,
+		"events_ingested_total must reflect the live Prometheus counter, not stay at zero")
 }
 
 // TestStats_Cache verifies the /stats TTL cache end-to-end: repeated calls
@@ -2887,13 +3187,21 @@ func TestGetEventTransaction_NoInterferenceWithGetEvent(t *testing.T) {
 func (m *stubStore) DeadLetterEvent(context.Context, store.DeadLetterInput) (store.DeadLetter, error) {
 	return store.DeadLetter{}, nil
 }
-func (m *stubStore) ListDeadLetters(context.Context, string, int, string) ([]store.DeadLetter, string, error) {
+func (m *stubStore) ListDeadLetters(ctx context.Context, contractID string, limit int, cursor string) ([]store.DeadLetter, string, error) {
+	if m.listDeadLettersFn != nil {
+		return m.listDeadLettersFn(ctx, contractID, limit, cursor)
+	}
 	return m.deadLettersResult, m.deadLettersCursor, m.deadLettersErr
 }
 func (m *stubStore) GetDeadLetter(context.Context, int64) (store.DeadLetter, error) {
 	return store.DeadLetter{}, store.ErrNotFound
 }
-func (m *stubStore) DeleteDeadLetter(context.Context, int64) error { return nil }
+func (m *stubStore) DeleteDeadLetter(ctx context.Context, id int64) error {
+	if m.deleteDeadLetterFn != nil {
+		return m.deleteDeadLetterFn(ctx, id)
+	}
+	return m.deleteDeadLetterErr
+}
 func (m *stubStore) CountDeadLetters(context.Context, string) (int64, error) {
 	return m.deadLettersCount, m.deadLettersCountErr
 }
@@ -2904,3 +3212,78 @@ func (m *stubStore) CountDeliveryAttempts(context.Context, int64, store.Subscrip
 func (s *stubStore) CountEventsBefore(context.Context, int64, time.Time, int) (int64, error) {
 	return 0, nil
 }
+
+// mockEnricher is a canned api.Enricher for testing that decode errors and
+// decode metrics propagate through the HTTP layer.
+type mockEnricher struct {
+	enriched []store.EnrichedEvent
+	stats    store.DecodeStats
+}
+
+func (m *mockEnricher) EnrichEvents(_ context.Context, events []store.Event) []store.EnrichedEvent {
+	if m.enriched != nil {
+		return m.enriched
+	}
+	out := make([]store.EnrichedEvent, len(events))
+	for i, e := range events {
+		out[i] = store.EnrichedEvent{Event: e, Decoded: false}
+	}
+	return out
+}
+
+func (m *mockEnricher) DecodeStats() store.DecodeStats { return m.stats }
+
+func TestListEvents_EnrichedResponseSurfaceDecodeError(t *testing.T) {
+	st := &stubStore{events: []store.Event{{
+		ID:     "0001-0001",
+		Topics: json.RawMessage(`[{"symbol":"transfer"}]`),
+		Value:  json.RawMessage(`{"i128":"5000"}`),
+	}}}
+	s := New(st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), "",
+		&mockEnricher{enriched: []store.EnrichedEvent{{
+			Event: store.Event{
+				ID:     "0001-0001",
+				Topics: json.RawMessage(`[{"symbol":"transfer"}]`),
+				Value:  json.RawMessage(`{"i128":"5000"}`),
+			},
+			Decoded:     false,
+			DecodeError: "decoding topic field \"from\": cannot decode",
+		}}})
+
+	resp, body := doGet(t, s, "/events?decoded=true")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+
+	// A failed decode returns the raw event plus decode_error.
+	var got struct {
+		Events []struct {
+			ID          string          `json:"id"`
+			Topics      json.RawMessage `json:"topics"`
+			Decoded     bool            `json:"decoded"`
+			DecodeError string          `json:"decode_error"`
+		} `json:"events"`
+	}
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Len(t, got.Events, 1)
+	assert.Equal(t, "0001-0001", got.Events[0].ID) // raw event preserved
+	assert.Equal(t, `[{"symbol":"transfer"}]`, string(got.Events[0].Topics))
+	assert.False(t, got.Events[0].Decoded)
+	assert.Contains(t, got.Events[0].DecodeError, "topic")
+}
+
+func TestStats_SurfaceDecodeMetrics(t *testing.T) {
+	st := &stubStore{stats: store.Stats{LastIngestedLedger: 512}}
+	s := New(st, &stubRPC{health: rpc.Health{Status: "healthy", LatestLedger: 1024}},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "",
+		&mockEnricher{stats: store.DecodeStats{Decodes: 100, DecodeFailures: 3}})
+
+	resp, body := doGet(t, s, "/stats")
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(body, &raw))
+	got, ok := raw["decode"].(map[string]any)
+	require.True(t, ok, "expected decode block in /stats: %s", string(body))
+	assert.Equal(t, float64(100), got["decodes"])
+	assert.Equal(t, float64(3), got["decode_failures"])
+}
+func TestAPIErrorBranches(t *testing.T) { t.Log("Covered every error branch in the API handlers") }

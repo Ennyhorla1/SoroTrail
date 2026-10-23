@@ -4,22 +4,30 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sorotrail/sorotrail/internal/rpc"
 	"github.com/sorotrail/sorotrail/internal/store"
 )
 
 // bodyOf runs h behind the compression middleware and returns the response
-// plus the body as the client would see it after decoding.
-func bodyOf(t *testing.T, h http.Handler, acceptEncoding string, minSize int) (*http.Response, string) {
+// plus the body as the client would see it after decoding. It returns the
+// drained testResponse rather than a *http.Response with a dead body.
+func bodyOf(t *testing.T, h http.Handler, acceptEncoding string, minSize int) (testResponse, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	if acceptEncoding != "" {
@@ -38,15 +46,16 @@ func bodyOf(t *testing.T, h http.Handler, acceptEncoding string, minSize int) (*
 		zr, err := gzip.NewReader(bytes.NewReader(raw))
 		require.NoError(t, err, "response claimed gzip but isn't decodable")
 		defer zr.Close()
+
 		out, err := io.ReadAll(zr)
 		require.NoError(t, err)
-		return resp, string(out)
+		return testResponse{StatusCode: resp.StatusCode, Header: resp.Header}, string(out)
 	case "deflate":
 		out, err := io.ReadAll(flate.NewReader(bytes.NewReader(raw)))
 		require.NoError(t, err)
-		return resp, string(out)
+		return testResponse{StatusCode: resp.StatusCode, Header: resp.Header}, string(out)
 	default:
-		return resp, string(raw)
+		return testResponse{StatusCode: resp.StatusCode, Header: resp.Header}, string(raw)
 	}
 }
 
@@ -314,8 +323,10 @@ func TestNegotiateEncoding(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // doGetWithAE sends a GET through s.Router() with an optional
-// Accept-Encoding header and returns the response plus body (raw, no decode).
-func doGetWithAE(t *testing.T, s *Server, path, acceptEncoding string) (*http.Response, []byte) {
+// Accept-Encoding header and returns the drained testResponse plus body
+// (raw, no decode). Like doGet it returns testResponse rather than a
+// *http.Response with a dead body.
+func doGetWithAE(t *testing.T, s *Server, path, acceptEncoding string) (testResponse, []byte) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	if acceptEncoding != "" {
@@ -327,7 +338,7 @@ func doGetWithAE(t *testing.T, s *Server, path, acceptEncoding string) (*http.Re
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return resp, body
+	return testResponse{StatusCode: resp.StatusCode, Header: resp.Header}, body
 }
 
 // decodeGzip decodes a gzip body and returns the uncompressed bytes.
@@ -472,18 +483,17 @@ func TestCompress_ListEndpointSmallErrorNotCompressed(t *testing.T) {
 	assert.Contains(t, e["error"], "invalid type")
 }
 
-func TestCompress_CountEndpointCompressed(t *testing.T) {
-	// count response is small — won't compress in practice, but the
-	// middleware is present and sets Vary: Accept-Encoding.
+func TestCompress_CountEndpointStaysOutsideCompression(t *testing.T) {
+	// /events/count is a single integer, so it lives outside the compression
+	// group. Vary is set by writeCacheHeaders on every cacheable read, so the
+	// meaningful assertion here is that the body was never encoded.
 	st := &stubStore{totalCount: 42}
 	s := newTestServer(st, nil)
 
 	resp, body := doGetWithAE(t, s, "/events/count", "gzip")
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	// Body under threshold, so no compression — but Vary is still set.
 	assert.Empty(t, resp.Header.Get("Content-Encoding"))
-	assert.Contains(t, resp.Header.Get("Vary"), "Accept-Encoding")
 
 	var out countResponse
 	require.NoError(t, json.Unmarshal(body, &out))
@@ -501,16 +511,16 @@ func TestCompress_ListSubscriptionsEndpoint(t *testing.T) {
 		"list subscriptions endpoint must set Vary: Accept-Encoding")
 }
 
-func TestCompress_GetSubscriptionEndpoint(t *testing.T) {
+func TestCompress_GetSubscriptionEndpointStaysOutsideCompression(t *testing.T) {
 	st := &stubStore{}
 	s := newTestServer(st, nil)
 
 	resp, _ := doGetWithAE(t, s, "/subscriptions/1", "gzip")
 
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
-		"not found — but the route is in the compression group")
-	assert.Contains(t, resp.Header.Get("Vary"), "Accept-Encoding",
-		"error from a list-route must still carry Vary: Accept-Encoding")
+		"stub has no subscription — but the route is outside the group")
+	assert.Empty(t, resp.Header.Get("Content-Encoding"),
+		"/subscriptions/{id} is one bounded row, not a compressed list route")
 }
 
 func TestCompress_GetEventEndpointCompressed(t *testing.T) {
@@ -750,8 +760,7 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 			name:     "a request with no upgrade headers returns false",
 			setup:    func(r *http.Request) {},
 			expected: false,
-		},
-		{
+		}, {
 			name: "Connection: Upgrade without the websocket token returns false",
 			setup: func(r *http.Request) {
 				r.Header.Set("Connection", "Upgrade")
@@ -765,6 +774,698 @@ func TestIsWebSocketUpgrade(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			tt.setup(req)
 			assert.Equal(t, tt.expected, isWebSocketUpgrade(req))
+		})
+	}
+}
+
+// recordingResponseWriter is a minimal ResponseWriter fake that counts
+// WriteHeader calls without forwarding anything. httptest.ResponseRecorder
+// can't detect a repeated WriteHeader — the once-only guarantee lives in
+// net/http above the recorder — so flush-once needs a fake that counts.
+type recordingResponseWriter struct {
+	headers     http.Header
+	status      int
+	writes      [][]byte
+	bodyLen     int
+	headerCalls int
+	writeErr    error
+}
+
+func newRecordingResponseWriter() *recordingResponseWriter {
+	return &recordingResponseWriter{headers: make(http.Header)}
+}
+
+func (w *recordingResponseWriter) Header() http.Header { return w.headers }
+
+func (w *recordingResponseWriter) WriteHeader(status int) {
+	w.headerCalls++
+	w.status = status
+}
+
+func (w *recordingResponseWriter) Write(b []byte) (int, error) {
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	w.writes = append(w.writes, append([]byte(nil), b...))
+	w.bodyLen += len(b)
+	return len(b), nil
+}
+
+// flushHeader sends the held status downstream exactly once, no matter how
+// many things nudge it: a decided WriteHeader, a later decide, and Close all
+// queue it up, and a handler that calls all three must not emit two heads.
+func TestCompressWriter_FlushHeader(t *testing.T) {
+	newDecidedWriter := func(t *testing.T) (*compressWriter, *recordingResponseWriter) {
+		t.Helper()
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.decide(false) // commit immediately, with nothing to forward
+		require.Equal(t, 1, rec.headerCalls, "precondition: decide flushed once")
+		return w, rec
+	}
+
+	t.Run("decide flushes the held status through to the client", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+
+		require.Equal(t, 0, rec.headerCalls, "nothing sent before the decision")
+		w.WriteHeader(http.StatusTeapot)
+		require.Equal(t, 0, rec.headerCalls, "the status is held until the decision")
+		require.Equal(t, http.StatusTeapot, w.status)
+
+		_ = w.decide(false)
+
+		assert.Equal(t, 1, rec.headerCalls)
+		assert.Equal(t, http.StatusTeapot, rec.status)
+	})
+
+	t.Run("defaults to 200 when the handler never set a status", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+
+		_ = w.decide(false)
+
+		assert.Equal(t, 1, rec.headerCalls)
+		assert.Equal(t, http.StatusOK, rec.status)
+	})
+
+	t.Run("repeated WriteHeader calls after the decision flush only once", func(t *testing.T) {
+		w, rec := newDecidedWriter(t)
+
+		w.WriteHeader(http.StatusTeapot)
+		w.WriteHeader(http.StatusServiceUnavailable)
+
+		assert.Equal(t, 1, rec.headerCalls)
+		assert.Equal(t, http.StatusOK, rec.status, "the already-flushed status is not overwritten")
+	})
+
+	t.Run("decide, Write and Close together still flush only once", func(t *testing.T) {
+		w, rec := newDecidedWriter(t)
+
+		_, _ = w.Write([]byte("body"))
+		w.Close()
+		w.Close()
+
+		assert.Equal(t, 1, rec.headerCalls)
+	})
+}
+
+// decide is the one-way commit: compressing sets the encoding headers and
+// routes the buffered prefix through the encoder; staying identity forwards
+// it untouched. Either way the header is flushed once and the buffer drained.
+func TestCompressWriter_Decide(t *testing.T) {
+	t.Run("a small decision keeps the response identity", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "application/json")
+		n, err := w.Write([]byte(`{"partial":`)) // buffered, below the threshold
+		require.NoError(t, err)
+		assert.Equal(t, len(`{"partial":`), n,
+			"the bytes are accepted even though they are not forwarded yet")
+		w.WriteHeader(http.StatusOK)
+		require.False(t, w.decided)
+		require.Equal(t, 0, rec.headerCalls)
+
+		require.NoError(t, w.decide(false))
+
+		assert.Equal(t, "", rec.headers.Get("Content-Encoding"))
+		assert.Equal(t, 1, rec.headerCalls)
+		assert.Equal(t, http.StatusOK, rec.status)
+		assert.Equal(t, [][]byte{[]byte(`{"partial":`)}, rec.writes)
+		assert.Nil(t, w.enc)
+		assert.True(t, w.decided)
+		assert.Nil(t, w.buf, "the buffered prefix is drained, not dropped")
+	})
+
+	t.Run("a big decision sets the encoding and forwards through the encoder", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("payload"))
+		w.WriteHeader(http.StatusOK)
+
+		require.NoError(t, w.decide(true))
+		w.Close() // flush the encoder so the gzip frame is complete and decodable
+
+		assert.Equal(t, "gzip", rec.headers.Get("Content-Encoding"))
+		assert.Equal(t, 1, rec.headerCalls)
+		require.NotEmpty(t, rec.writes, "the encoder emitted a gzip frame")
+		zr, err := gzip.NewReader(bytes.NewReader(bytes.Join(rec.writes, nil)))
+		require.NoError(t, err)
+		out, err := io.ReadAll(zr)
+		require.NoError(t, err)
+		assert.Equal(t, "payload", string(out))
+	})
+
+	t.Run("deflate produces a decodable flate stream", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "deflate", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("payload"))
+
+		require.NoError(t, w.decide(true))
+		w.Close() // flush the encoder so the flate stream is complete and decodable
+
+		assert.Equal(t, "deflate", rec.headers.Get("Content-Encoding"))
+		out, err := io.ReadAll(flate.NewReader(bytes.NewReader(bytes.Join(rec.writes, nil))))
+		require.NoError(t, err)
+		assert.Equal(t, "payload", string(out))
+	})
+
+	t.Run("a big decision on an incompressible type stays identity", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("big but not worth encoding"))
+
+		require.NoError(t, w.decide(true))
+
+		assert.Equal(t, "", rec.headers.Get("Content-Encoding"))
+		assert.Nil(t, w.enc)
+		assert.Equal(t, 1, rec.headerCalls)
+		assert.Equal(t, [][]byte{[]byte("big but not worth encoding")}, rec.writes)
+	})
+
+	t.Run("a big decision drops Content-Length and weakens a strong ETag", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "7")
+		w.Header().Set("ETag", `"v1"`)
+		_, _ = w.Write([]byte("payload"))
+
+		require.NoError(t, w.decide(true))
+
+		assert.Equal(t, "", rec.headers.Get("Content-Length"),
+			"the identity length must not describe the compressed body")
+		assert.Equal(t, `W/"v1"`, rec.headers.Get("ETag"))
+	})
+
+	t.Run("a decided writer forwards every later write directly", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		_, _ = w.Write([]byte("tiny"))
+		require.NoError(t, w.decide(false))
+		rec.writes = nil // clear the flushed prefix so only the later writes are observed
+
+		_, _ = w.Write([]byte("post"))
+		_, _ = w.Write([]byte("decision"))
+
+		assert.Equal(t, [][]byte{[]byte("post"), []byte("decision")}, rec.writes)
+	})
+
+	t.Run("a second decision is a no-op", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("payload"))
+
+		require.NoError(t, w.decide(true))
+		require.NoError(t, w.decide(true))
+		w.Close()
+
+		assert.Equal(t, "gzip", rec.headers.Get("Content-Encoding"), "the first decision wins")
+		assert.Equal(t, 1, rec.headerCalls)
+		zr, err := gzip.NewReader(bytes.NewReader(bytes.Join(rec.writes, nil)))
+		require.NoError(t, err)
+		out, err := io.ReadAll(zr)
+		require.NoError(t, err)
+		assert.Equal(t, "payload", string(out), "exactly one frame, not a double emission")
+	})
+
+	t.Run("Write surfaces the error when the crossing write fails", func(t *testing.T) {
+		boom := errors.New("boom")
+		rec := newRecordingResponseWriter()
+		rec.writeErr = boom
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: 4}
+		w.Header().Set("Content-Type", "application/json")
+
+		n, err := w.Write([]byte("0123456789")) // crosses the threshold
+
+		assert.Equal(t, 0, n)
+		assert.Equal(t, boom, err)
+	})
+
+	t.Run("decide surfaces an encoder failure on the buffered prefix", func(t *testing.T) {
+		boom := errors.New("boom")
+		rec := newRecordingResponseWriter()
+		rec.writeErr = boom
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("payload"))
+
+		err := w.decide(true)
+
+		assert.Equal(t, boom, err)
+		assert.Equal(t, 1, rec.headerCalls, "the header still went out before the body failed")
+	})
+}
+
+// write is the post-decision hot path: bytes go into the encoder when one is
+// installed, or straight to the underlying writer otherwise.
+func TestCompressWriter_Write(t *testing.T) {
+	t.Run("routes through the encoder after committing to compression", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "application/json")
+		w.buf = []byte("prefix")
+		require.NoError(t, w.decide(true))
+
+		n, err := w.Write([]byte("hello"))
+		require.NoError(t, err)
+		assert.Equal(t, len("hello"), n, "Write reports the bytes it accepted")
+		w.Close() // flush the encoder so the gzip stream is complete and decodable
+
+		require.NotEmpty(t, rec.writes)
+		zr, err := gzip.NewReader(bytes.NewReader(bytes.Join(rec.writes, nil)))
+		require.NoError(t, err)
+		out, err := io.ReadAll(zr)
+		require.NoError(t, err)
+		assert.Equal(t, "prefixhello", string(out))
+	})
+
+	t.Run("passes bytes straight through when staying identity", func(t *testing.T) {
+		rec := newRecordingResponseWriter()
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "image/png")
+		require.NoError(t, w.decide(true))
+
+		n, err := w.Write([]byte("raw bytes"))
+
+		require.NoError(t, err)
+		assert.Equal(t, 9, n, "the underlying writer's byte count is returned")
+		assert.Equal(t, [][]byte{[]byte("raw bytes")}, rec.writes)
+	})
+
+	t.Run("propagates errors from the underlying writer", func(t *testing.T) {
+		boom := errors.New("boom")
+		rec := newRecordingResponseWriter()
+		rec.writeErr = boom
+		w := &compressWriter{ResponseWriter: rec, encoding: "gzip", minSize: CompressMinSize}
+		w.Header().Set("Content-Type", "image/png")
+		require.NoError(t, w.decide(true))
+
+		n, err := w.Write([]byte("raw bytes"))
+
+		assert.Equal(t, 0, n)
+		assert.Equal(t, boom, err)
+	})
+}
+
+// Vary: Accept-Encoding is what stops a shared cache from handing a gzip
+// body to a client that can't decode it, so it must be present whenever the
+// middleware could compress — and it must not be duplicated or clobber a
+// Vary the handler already set.
+func TestAddVaryAcceptEncoding(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing string
+		expected string
+	}{
+		{
+			name:     "a missing Vary gains Accept-Encoding",
+			existing: "",
+			expected: "Accept-Encoding",
+		},
+		{
+			name:     "an unrelated Vary gains Accept-Encoding without clobbering it",
+			existing: "Accept-Language",
+			expected: "Accept-Language, Accept-Encoding",
+		},
+		{
+			name:     "an existing Accept-Encoding is not duplicated",
+			existing: "Accept-Encoding",
+			expected: "Accept-Encoding",
+		},
+		{
+			name:     "a combined Vary that already lists Accept-Encoding is left alone",
+			existing: "Accept-Language, Accept-Encoding",
+			expected: "Accept-Language, Accept-Encoding",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := make(http.Header)
+			if tt.existing != "" {
+				h.Set("Vary", tt.existing)
+			}
+
+			addVaryAcceptEncoding(h)
+
+			assert.Equal(t, tt.expected, h.Get("Vary"))
+		})
+	}
+}
+
+// TestCompress_HijackSuccess asserts that http.Hijacker is forwarded through
+// compressWriter, the returned net.Conn is usable, and the middleware does not
+// attempt to write headers or trailers to a connection it no longer owns after return.
+func TestCompress_HijackSuccess(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		require.True(t, ok, "compressWriter must implement http.Hijacker")
+
+		conn, rw, err := hj.Hijack()
+		require.NoError(t, err)
+		defer conn.Close()
+
+		// Write raw HTTP response directly through hijacked connection
+		respText := "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello"
+		_, err = rw.WriteString(respText)
+		require.NoError(t, err)
+		require.NoError(t, rw.Flush())
+	})
+
+	srv := httptest.NewServer(Compress(0)(handler))
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(body))
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestCompress_HijackNotSupported asserts that if the underlying ResponseWriter
+// does not implement http.Hijacker (such as httptest.ResponseRecorder),
+// Hijack returns http.ErrNotSupported rather than panicking on a type assertion.
+func TestCompress_HijackNotSupported(t *testing.T) {
+	rec := httptest.NewRecorder()
+	cw := &compressWriter{
+		ResponseWriter: rec,
+		encoding:       "gzip",
+		minSize:        100,
+	}
+
+	conn, rw, err := cw.Hijack()
+	assert.Nil(t, conn)
+	assert.Nil(t, rw)
+	assert.ErrorIs(t, err, http.ErrNotSupported)
+}
+
+// TestCompress_WebSocketUpgrade asserts that a WebSocket upgrade succeeds
+// with the Compress middleware in the handler chain.
+func TestCompress_WebSocketUpgrade(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Logf("websocket accept failed: %v", err)
+			return
+		}
+		defer c.CloseNow()
+
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+
+		err = c.Write(ctx, websocket.MessageText, []byte("ws-payload"))
+		assert.NoError(t, err)
+		c.Close(websocket.StatusNormalClosure, "")
+	})
+
+	srv := httptest.NewServer(Compress(0)(handler))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, resp, err := websocket.Dial(ctx, wsURL, nil)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	require.NoError(t, err, "WebSocket upgrade must succeed through compression middleware")
+	defer conn.CloseNow()
+
+	msgType, data, err := conn.Read(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, websocket.MessageText, msgType)
+	assert.Equal(t, "ws-payload", string(data))
+}
+
+// TestCompress_HijackedPreventsWriteAndFlush verifies that once a connection
+// is hijacked, subsequent calls to Write, WriteHeader, Flush, and Close on the
+// compressWriter do not write to or flush the underlying writer.
+func TestCompress_HijackedPreventsWriteAndFlush(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	cw := &compressWriter{
+		ResponseWriter: rec,
+		encoding:       "gzip",
+		minSize:        100,
+		hijacked:       true, // simulate successful hijack
+	}
+
+	// Write should return http.ErrHijacked
+	n, err := cw.Write([]byte("more data"))
+	assert.Equal(t, 0, n)
+	assert.ErrorIs(t, err, http.ErrHijacked)
+
+	// WriteHeader, Flush, and Close should no-op safely
+	assert.NotPanics(t, func() {
+		cw.WriteHeader(http.StatusOK)
+		cw.Flush()
+		cw.Close()
+	})
+
+	assert.Equal(t, 0, rec.Body.Len(), "no bytes should have been written to recorder after hijack")
+	assert.False(t, cw.wrote, "header should not have been flushed after hijack")
+}
+
+const (
+	// compressTestContract is a valid 56-character contract ID.
+	compressTestContract = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+	// compressTestAddress is a valid 56-character account address.
+	compressTestAddress = "GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3B2WSQHG4W37"
+)
+
+func compressTestContractID(i int) string {
+	return fmt.Sprintf("C%055d", i)
+}
+
+func bigCompressEvent(id string) store.Event {
+	return store.Event{
+		ID:         id,
+		ContractID: compressTestContract,
+		TxHash:     "tx-hash-" + id,
+		Ledger:     100,
+		Type:       "contract",
+		Topics:     json.RawMessage(`["transfer"]`),
+		Value:      json.RawMessage(`{"payload":"` + strings.Repeat("x", 2000) + `"}`),
+	}
+}
+
+// doGetWithAEAndHeaders is doGetWithAE with extra request headers, for the
+// routes that also require an API key.
+func doGetWithAEAndHeaders(t *testing.T, s *Server, path, acceptEncoding string, headers map[string]string) (testResponse, []byte) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if acceptEncoding != "" {
+		req.Header.Set("Accept-Encoding", acceptEncoding)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	rec := httptest.NewRecorder()
+	s.Router().ServeHTTP(rec, req)
+	resp := rec.Result()
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return testResponse{StatusCode: resp.StatusCode, Header: resp.Header}, body
+}
+
+func newCompressTestServer(st store.Store) *Server {
+	return New(st, &stubRPC{health: rpc.Health{Status: "healthy"}},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test-key")
+}
+
+// bigContractStatsStore gives the stats endpoint a non-zero count so the
+// type breakdown is attached; the embedded stub supplies the breakdown.
+type bigContractStatsStore struct {
+	*stubStore
+}
+
+func (s *bigContractStatsStore) CountContractEvents(context.Context, string) (int64, error) {
+	return 5, nil
+}
+
+// bigDeliveryStore lets the deliveries route reach ListDeliveryAttempts;
+// the shared stub's GetSubscription always reports not-found.
+type bigDeliveryStore struct {
+	*stubStore
+	attempts []store.DeliveryAttempt
+}
+
+func (s *bigDeliveryStore) GetSubscription(context.Context, int64, store.SubscriptionOwner) (store.Subscription, error) {
+	return store.Subscription{ID: 1}, nil
+}
+
+func (s *bigDeliveryStore) ListDeliveryAttempts(context.Context, int64, int, store.SubscriptionOwner) ([]store.DeliveryAttempt, error) {
+	return s.attempts, nil
+}
+
+// TestCompressedRoutesProduceGzip exercises every route inside the compression
+// group with a response large enough to cross CompressMinSize. A route that is
+// accidentally moved out of the group (or loses gzip negotiation) fails here.
+func TestCompressedRoutesProduceGzip(t *testing.T) {
+	events := bigListStore().events
+
+	rawEvent := bigCompressEvent("0000000001-0000000001")
+	rawEvent.RawTopicXDR = []string{strings.Repeat("A", 2000)}
+	rawEvent.RawValueXDR = strings.Repeat("B", 2000)
+
+	anchor := bigCompressEvent("0000000001-0000000001")
+	anchor.TxHash = "tx-1"
+	siblings := make([]store.Event, 20)
+	for i := range siblings {
+		siblings[i] = bigCompressEvent(fmt.Sprintf("0000000002-%010d", i))
+	}
+
+	buckets := make([]store.AggregateBucket, 100)
+	for i := range buckets {
+		buckets[i] = store.AggregateBucket{Bucket: fmt.Sprintf("ledger-%d", 1000+i), Count: int64(i)}
+	}
+
+	contracts := make([]store.ContractSummary, 60)
+	for i := range contracts {
+		contracts[i] = store.ContractSummary{
+			ContractID:  compressTestContractID(i),
+			EventCount:  int64(i),
+			FirstLedger: 1,
+			LastLedger:  100,
+			LastSeen:    time.Now(),
+		}
+	}
+
+	subs := make([]store.Subscription, 20)
+	for i := range subs {
+		subs[i] = store.Subscription{
+			ID:        int64(i + 1),
+			URL:       "https://hooks.example.com/" + strings.Repeat("a", 80),
+			Secret:    strings.Repeat("s", 64),
+			Enabled:   true,
+			CreatedAt: time.Now(),
+		}
+	}
+
+	attempts := make([]store.DeliveryAttempt, 30)
+	for i := range attempts {
+		attempts[i] = store.DeliveryAttempt{
+			ID:             int64(i + 1),
+			SubscriptionID: 1,
+			EventID:        fmt.Sprintf("0000000003-%010d", i),
+			Status:         "failed",
+			ResponseCode:   http.StatusInternalServerError,
+			DurationMs:     123,
+			Error:          strings.Repeat("e", 100),
+			CreatedAt:      time.Now(),
+		}
+	}
+
+	watched := make([]store.WatchedContract, 60)
+	for i := range watched {
+		watched[i] = store.WatchedContract{
+			ContractID: compressTestContractID(i),
+			Network:    "testnet",
+			AddedAt:    time.Now(),
+		}
+	}
+
+	types := make([]store.ContractEventTypeCount, 100)
+	for i := range types {
+		types[i] = store.ContractEventTypeCount{Type: fmt.Sprintf("event_type_%03d", i), Count: int64(i)}
+	}
+
+	addressContracts := make([]string, 100)
+	for i := range addressContracts {
+		addressContracts[i] = compressTestContractID(i)
+	}
+
+	deliveryStore := &bigDeliveryStore{stubStore: &stubStore{}, attempts: attempts}
+
+	cases := []struct {
+		name    string
+		path    string
+		store   store.Store
+		headers map[string]string
+	}{
+		{"events list", "/events", bigListStore(), nil},
+		{"aggregate", "/events/aggregate?bucket=ledger", &stubStore{aggregateBuckets: buckets}, nil},
+		{"event raw", "/events/0000000001-0000000001/raw", &stubStore{event: rawEvent}, nil},
+		{"transaction siblings", "/events/0000000001-0000000001/transaction", &stubStore{event: anchor, txSiblings: siblings}, nil},
+		{"single event", "/events/0000000001-0000000001", &stubStore{event: bigCompressEvent("0000000001-0000000001")}, nil},
+		{"contracts list", "/contracts", &stubStore{listContractsResult: contracts}, nil},
+		{"contract events", "/contracts/" + compressTestContract + "/events", &stubStore{events: events}, nil},
+		{"contract stats", "/contracts/" + compressTestContract + "/stats", &bigContractStatsStore{&stubStore{eventTypeCounts: types}}, nil},
+		{"address events", "/addresses/" + compressTestAddress + "/events", &stubStore{addressEvents: events}, nil},
+		{"address summary", "/addresses/" + compressTestAddress + "/summary", &stubStore{addressSummary: store.AddressSummary{
+			Address:           compressTestAddress,
+			EventCount:        100,
+			DistinctContracts: addressContracts,
+		}}, nil},
+		{"subscriptions list", "/subscriptions", &stubStore{subscriptions: subs}, nil},
+		{"deliveries list", "/subscriptions/1/deliveries", deliveryStore, nil},
+		{"watched contracts", "/watched-contracts", &stubStore{watchedList: watched}, map[string]string{"X-API-Key": "test-key"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newCompressTestServer(tc.store)
+
+			resp, body := doGetWithAEAndHeaders(t, s, tc.path, "gzip", tc.headers)
+
+			require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+			assert.Equal(t, "gzip", resp.Header.Get("Content-Encoding"),
+				"route is in the compression group and the body is larger than CompressMinSize")
+			assert.Contains(t, resp.Header.Get("Vary"), "Accept-Encoding")
+
+			decoded := decodeGzip(t, body)
+			assert.Greater(t, len(decoded), CompressMinSize)
+		})
+	}
+}
+
+// TestUncompressedRoutesStayIdentity is the other half of the policy: bounded
+// reads and streaming exports are registered outside the compression group.
+// The exports are deliberately large here to prove that "outside" really means
+// identity even when the body would otherwise be worth compressing.
+func TestUncompressedRoutesStayIdentity(t *testing.T) {
+	cases := []struct {
+		name   string
+		path   string
+		store  *stubStore
+		status int
+		large  bool
+	}{
+		{"events count", "/events/count", &stubStore{totalCount: 42}, http.StatusOK, false},
+		{"contract summary", "/contracts/" + compressTestContract, &stubStore{}, http.StatusOK, false},
+		{"global stats", "/stats", &stubStore{}, http.StatusOK, false},
+		{"single subscription", "/subscriptions/1", &stubStore{}, http.StatusNotFound, false},
+		{"events csv", "/events.csv", bigListStore(), http.StatusOK, true},
+		{"contract export", "/contracts/" + compressTestContract + "/export?from_ledger=1&to_ledger=1000", bigListStore(), http.StatusOK, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(tc.store, nil)
+
+			resp, body := doGetWithAE(t, s, tc.path, "gzip")
+
+			require.Equal(t, tc.status, resp.StatusCode, "body: %s", body)
+			assert.Empty(t, resp.Header.Get("Content-Encoding"),
+				"route is outside the compression group and must stay identity")
+			if tc.large {
+				assert.Greater(t, len(body), CompressMinSize,
+					"this large response is intentionally left identity")
+			}
 		})
 	}
 }

@@ -4,12 +4,20 @@
 // With no arguments it runs the indexer. Subcommands cover maintenance:
 //
 //	sorotrail replay --from-ledger N [--to-ledger M]
+//	sorotrail apikey create|list|revoke
+//	sorotrail contracts add|list|remove
 //	sorotrail backfill --contract C... --from-ledger N [--to-ledger M]
+//	sorotrail migrate up|down|status [--steps N]
 package main
+
+// Wave: keep assigned SoroTrail checks grouped for ndyugwu.
+
+// Wave: keep assigned SoroTrail checks grouped for Ennyblack.
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -30,7 +38,9 @@ import (
 	"github.com/sorotrail/sorotrail/internal/config"
 	"github.com/sorotrail/sorotrail/internal/decode"
 	"github.com/sorotrail/sorotrail/internal/ingester"
+	"github.com/sorotrail/sorotrail/internal/metrics"
 	"github.com/sorotrail/sorotrail/internal/pruner"
+	"github.com/sorotrail/sorotrail/internal/requestid"
 	"github.com/sorotrail/sorotrail/internal/rpc"
 	"github.com/sorotrail/sorotrail/internal/spec"
 	"github.com/sorotrail/sorotrail/internal/store"
@@ -42,29 +52,70 @@ var errInterrupted = errors.New("interrupted")
 
 func main() {
 	err := dispatch(os.Args[1:])
+	code := exitCode(err)
+	if code == 0 {
+		return
+	}
+	if code == 1 {
+		fmt.Fprintln(os.Stderr, "sorotrail:", err)
+	}
+	os.Exit(code)
+}
+
+// exitCode maps dispatch's result onto the process exit status: 0 on
+// success, 2 when a one-shot run was interrupted (scripts re-run to
+// resume, so the distinction from a genuine failure is part of the
+// interface), and 1 for every other error. It is a separate function
+// so the mapping is testable without os.Exit.
+func exitCode(err error) int {
 	switch {
 	case err == nil:
+		return 0
 	case errors.Is(err, errInterrupted):
-		os.Exit(2)
+		return 2
 	default:
-		fmt.Fprintln(os.Stderr, "sorotrail:", err)
-		os.Exit(1)
+		return 1
 	}
 }
 
 // dispatch routes to a subcommand, defaulting to the indexer so existing
-// deployments (and the Dockerfile entrypoint) keep working unchanged.
+// deployments (and the Dockerfile entrypoint) keep working unchanged. Flags
+// before the first word are options for that default ingester (for example,
+// `sorotrail --dry-run`).
 func dispatch(args []string) error {
 	if len(args) == 0 {
 		return run()
 	}
+	// Subcommands that are spelled as flags have to be routed before the
+	// catch-all below, or they would be handed to the ingester and rejected
+	// as undefined flags. help and version are the only two.
+	switch args[0] {
+	case "help", "-h", "--help":
+		usage()
+		return nil
+	case "--version", "-V":
+		return runVersion(args[1:])
+	}
+	// Anything else starting with a dash is an option for the default
+	// ingester, so `sorotrail --dry-run` keeps working without a subcommand.
+	if strings.HasPrefix(args[0], "-") {
+		return runWithArgs(args)
+	}
 	switch args[0] {
 	case "replay":
 		return runReplay(args[1:])
+	case "apikey":
+		return runAPIKey(args[1:])
+	case "contracts":
+		return runContracts(args[1:])
 	case "backfill":
 		return runBackfill(args[1:])
+	case "loadtest":
+		return runLoadtest(args[1:])
 	case "index-addresses":
 		return runIndexAddresses(args[1:])
+	case "migrate":
+		return runMigrate(args[1:])
 	case "healthcheck":
 		// The healthcheck subcommand manages its own exit codes
 		// (0 healthy, 1 unhealthy, 2 usage error) — the docker
@@ -76,10 +127,27 @@ func dispatch(args []string) error {
 			os.Exit(code)
 		}
 		return nil
+	case "health":
+		// Like healthcheck, manages its own exit codes (0 healthy,
+		// 1 unhealthy, 2 usage) so external probes — k8s liveness,
+		// load balancers, CI gates — read the outcome directly.
+		code := runHealth(args[1:])
+		if code != 0 {
+			os.Exit(code)
+		}
+		return nil
 	case "schema-inspect":
 		return runSchemaInspect(args[1:])
 	case "migrate-status":
 		return runMigrateStatus(args[1:])
+	case "completion":
+		return runCompletion(args[1:])
+	case "version", "--version", "-V":
+		return runVersion(args[1:])
+	case "stats":
+		return runStats(args[1:])
+	case "config":
+		return runConfig(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -90,34 +158,110 @@ func dispatch(args []string) error {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: sorotrail [subcommand]
+	fmt.Fprint(os.Stderr, `usage: sorotrail [--dry-run]
+       sorotrail <subcommand> [flags]
 
-With no subcommand, runs the indexer (ingester + HTTP API).
+With no subcommand, runs the indexer (ingester + HTTP API). Use --dry-run
+to fetch and log the events the ingester would write, then exit without
+writing anything to the database.
+
+options:
+  --dry-run            fetch and log the ingester's planned writes only
+  -h, --help           show this help message
 
 subcommands:
-  replay       re-decode stored events with the current decoder
-               (sorotrail replay --help)
-  backfill     ingest historical contract events from Horizon
-               (sorotrail backfill --help)
+  replay           re-decode stored events with the current decoder
+                   (sorotrail replay --help)
+  apikey           issue, list, and revoke API keys
+                   (sorotrail apikey --help)
+  contracts        add, list, and remove watched contracts
+                   (sorotrail contracts --help)
+  backfill         ingest historical contract events from Horizon
+                   (sorotrail backfill --help)
+  loadtest         run the synthetic ingester load-test harness
+                   (sorotrail loadtest --help)
   index-addresses  rebuild the address→event inverted index from stored events
-               (sorotrail index-addresses --help)
-  healthcheck  probe /health and exit (used by docker HEALTHCHECK)
-               (sorotrail healthcheck --help)
-  schema-inspect  report migration state, partitions, and table sizes
-               (sorotrail schema-inspect --help)
-  migrate-status report pending migrations without applying them
-               (sorotrail migrate-status --help)
+                   (sorotrail index-addresses --help)
+  migrate          apply, roll back, or inspect database migrations
+                   (sorotrail migrate --help)
+  health           probe the API /health and exit nonzero on failure
+                   (sorotrail health --help)
+  healthcheck      probe /health and exit (used by docker HEALTHCHECK)
+                   (sorotrail healthcheck --help)
+  schema-inspect   report migration state, partitions, and table sizes
+                   (sorotrail schema-inspect --help)
+  migrate-status   report pending migrations without applying them
+                   (sorotrail migrate-status --help)
+  completion       print a shell completion script (bash, zsh, fish)
+                   (sorotrail completion --help)
+  version          print the build version, commit, and build date
+                   (sorotrail version --help)
+  stats            print store stats as a table
+                   (sorotrail stats --help)
+  config           print the effective configuration with secrets redacted
+                   (sorotrail config --help)
 `)
 }
 
+// ingesterFlags contains options accepted by the default (no-subcommand)
+// ingester invocation. It is intentionally parsed separately from the
+// maintenance subcommands so their existing flag sets remain unchanged.
+type ingesterFlags struct {
+	dryRun bool
+}
+
+func parseIngesterFlags(args []string) (ingesterFlags, error) {
+	fs := flag.NewFlagSet("sorotrail", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), `usage: sorotrail [--dry-run]
+
+Fetch events with the live ingester. With --dry-run, events and cursor
+updates are logged but no database writes are made; the preview drains
+the currently available RPC data and exits.
+
+options:
+`)
+		fs.PrintDefaults()
+	}
+	var f ingesterFlags
+	fs.BoolVar(&f.dryRun, "dry-run", false, "fetch and log what would be written without writing to the database")
+	if err := fs.Parse(args); err != nil {
+		return ingesterFlags{}, err
+	}
+	if fs.NArg() != 0 {
+		fs.Usage()
+		return ingesterFlags{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	return f, nil
+}
+
+// run is kept as the no-argument entry point used by the main package and
+// by the default deployment path.
 func run() error {
+	return runWithArgs(nil)
+}
+
+func runWithArgs(args []string) error {
+	flags, err := parseIngesterFlags(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil // usage was printed by flag
+		}
+		return err
+	}
+	return runService(flags.dryRun)
+}
+
+func runService(dryRun bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 	log, logLevel := newLoggerWithLevel(cfg.LogLevel, cfg.LogFormat)
 
-	log.Info("startup configuration", cfg.LoggableFields()...)
+	startupFields := append([]any{}, cfg.LoggableFields()...)
+	startupFields = append(startupFields, "dry_run", dryRun)
+	log.Info("startup configuration", startupFields...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	provider, shutdown, err := telemetry.Configure(ctx, log)
@@ -130,8 +274,14 @@ func run() error {
 	_ = provider
 	defer stop()
 
-	if err := store.Migrate(cfg.DatabaseURL); err != nil {
-		return err
+	// A dry-run must not mutate the database merely to make the preview
+	// possible. The normal startup path still migrates before opening the
+	// pool, while the preview assumes the existing schema is already
+	// available and performs read-only queries.
+	if !dryRun {
+		if err := store.Migrate(cfg.DatabaseURL); err != nil {
+			return err
+		}
 	}
 
 	var (
@@ -140,10 +290,21 @@ func run() error {
 		pg   *store.Postgres
 	)
 	if strings.HasPrefix(cfg.DatabaseURL, "clickhouse://") {
-		st, err = store.NewStoreFromURL(cfg.DatabaseURL)
-		if err != nil {
-			return err
+		if cfg.RetentionEnabled() {
+			return fmt.Errorf("clickhouse: retention pruning is not supported by the clickhouse backend")
 		}
+		// The ClickHouse backend deliberately does not implement the
+		// per-contract resume cursors the watched-contract ingester depends
+		// on, so a deployment configured to use it would quietly resume from
+		// ledger 0 on every restart and watch nothing. Refuse to start
+		// rather than serve a healthy-looking process that ingests into the
+		// ground. The same check applies once NewStoreFromURL succeeds, so
+		// the refusal cannot be skipped by a bad URL.
+		if _, err = store.NewStoreFromURL(cfg.DatabaseURL); err != nil {
+			return fmt.Errorf("clickhouse: %w", err)
+		}
+		return fmt.Errorf(
+			"clickhouse: the backend is not production-ready; use a postgres:// DATABASE_URL")
 	} else {
 		pool, err = store.NewPool(ctx, cfg.DatabaseURL, cfg.DBMaxConns, cfg.DBMinConns, cfg.DBMaxConnLifetime, cfg.DBMaxConnIdleTime)
 		if err != nil {
@@ -191,38 +352,94 @@ func run() error {
 		st = pg
 	}
 
+	// Single-provider client: the interval limiter caps the request rate
+	// at RPC_RATE_LIMIT (default 10 req/s, the public endpoint limit) and
+	// the retry wrapper applies the configured backoff, honoring any
+	// Retry-After hint a rate-limiting provider sends (issue #58).
+	rpcClient := newRPCClient(cfg, log)
+
+	if dryRun {
+		// Do not seed WATCHED_CONTRACTS or start any of the service's
+		// writers (API routes, webhooks, auditor, pruners, archival, or
+		// multi-tenant bootstrap). The preview uses an in-memory cursor and
+		// returns after the currently available RPC data has been walked.
+		ingestStore := st
+		if len(cfg.WatchedContracts) > 0 {
+			ingestStore = watchListOverrideStore{
+				Store:   st,
+				watched: watchedContracts(cfg.WatchedContracts, cfg.Network),
+			}
+		}
+		ing := ingester.New(rpcClient, ingestStore, decode.XDRDecoder{}, log, ingesterOptionsFromConfig(cfg, true))
+		log.Info("ingester dry-run enabled (no database writes)")
+		if err := ing.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("ingester dry-run: %w", err)
+		}
+		return nil
+	}
+
+	// Seed WATCHED_CONTRACTS on the configured network: the watch list is
+	// keyed by (network, contract), and the ingester only fetches entries
+	// matching its own NETWORK, so seeding without the network would park
+	// the contracts on "default" and watch nothing.
 	for _, id := range cfg.WatchedContracts {
-		if err := st.AddWatchedContract(ctx, id); err != nil {
+		if err := st.AddWatchedContract(ctx, store.WatchedContract{ContractID: id, Network: cfg.Network}); err != nil {
 			return err
 		}
 	}
 
 	// Shared broadcaster for live event streaming across all networks.
 	bcast := broadcast.New(broadcast.DefaultBufferSize)
-
-	// Single-provider client: the interval limiter caps the request rate
-	// at RPC_RATE_LIMIT (default 10 req/s, the public endpoint limit) and
-	// the retry wrapper applies the configured backoff, honoring any
-	// Retry-After hint a rate-limiting provider sends (issue #58).
-	rpcClient := rpc.NewRetryClient(
-		rpc.NewHTTPClient(
-			cfg.RPCURL,
-			rpc.WithRateLimitRPS(cfg.RPCRateLimit),
-			rpc.WithHTTPTimeout(cfg.RPCHTTPTimeout),
-		),
-		rpc.RetryConfig{
-			MaxAttempts: cfg.RPCMaxAttempts,
-			BaseBackoff: cfg.RPCBaseBackoff,
-			MaxBackoff:  cfg.RPCMaxBackoff,
-			Jitter:      cfg.RPCJitter,
-			Logger:      log,
-		})
 	wh := webhook.NewNotifier(st, log)
 
 	// Wire the spec cache and enricher for spec-decoded event views.
-	specCache := spec.NewCache(st)
+	// The cache is keyed by wasm hash with a TTL; the fetcher doubles as
+	// the wasm-hash resolver so contract upgrades (a changed hash)
+	// invalidate the previously cached spec automatically.
 	specFetcher := spec.NewFetcher(rpcClient)
-	specEnricher := spec.NewEnricher(specFetcher, specCache, log)
+	cacheOpts := []spec.Option{
+		spec.WithWasmHashResolver(specFetcher),
+		spec.WithLogger(log),
+	}
+	// The spec cache is per-process, so a change that alters what a
+	// contract decodes to has to be published for the other replicas to
+	// pick up. Postgres is the shared dependency; the SQLite and
+	// ClickHouse deployments run single-process and keep working without
+	// it.
+	if pg != nil {
+		cacheOpts = append(cacheOpts, spec.WithInvalidationPublisher(pg))
+	}
+	specCache := spec.NewCache(st, cacheOpts...)
+	specEnricher := spec.NewEnricher(specFetcher, specCache, log, st)
+
+	// Subscribe to the invalidation channel: every replica evicts a
+	// contract's cached spec when another replica changes it. Without
+	// this, an override written through one replica is not seen by the
+	// others until their own cache expires, so the same request decodes
+	// differently depending on which replica served it.
+	if pg != nil {
+		listener := &store.SpecInvalidationListener{
+			DatabaseURL: cfg.DatabaseURL,
+			Logger:      log,
+			OnInvalidation: func(contractID string) {
+				specCache.ApplyRemoteInvalidation(contractID)
+				metrics.SpecInvalidationsReceived.Inc()
+				log.Debug("applied a spec cache invalidation from another replica",
+					"contract_id", contractID)
+			},
+			OnReconnect: func() {
+				// A reconnect may have missed notifications, so nothing
+				// the cache holds can be trusted.
+				specCache.Clear()
+				log.Info("cleared the spec cache after reconnecting to the invalidation channel")
+			},
+		}
+		go func() {
+			if err := listener.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error("spec invalidation listener stopped", "error", err)
+			}
+		}()
+	}
 
 	// Wrap the raw RPC client so per-method error totals are tracked and
 	// surfaced via /stats. specFetcher already holds a reference to the
@@ -258,8 +475,13 @@ func run() error {
 		}
 	}
 
-	ing := ingester.New(countingClient, st, decode.XDRDecoder{}, log, ingester.Options{
+	// The decoder is wrapped in a memoizing cache: ingestion re-decodes the
+	// same topic symbols and values constantly, so hashing the raw XDR and
+	// serving repeats from an LRU removes that redundant work.
+	ing := ingester.New(countingClient, st, decode.NewCachingDecoder(decode.XDRDecoder{}, 0), log, ingester.Options{
 		PollInterval:            cfg.PollInterval,
+		PollIntervalMin:         cfg.PollIntervalMin,
+		PollIntervalMax:         cfg.PollIntervalMax,
 		StartLedger:             cfg.StartLedger,
 		StartLedgerRaw:          cfg.StartLedgerRaw,
 		RetentionLedgers:        cfg.RetentionLedgers,
@@ -271,8 +493,11 @@ func run() error {
 		BatchSize:               cfg.BatchSize,
 		BatchTargetLatency:      cfg.BatchTargetLatency,
 		BatchMaxBackoff:         cfg.BatchMaxBackoff,
+		MinBackoff:              cfg.IngesterMinBackoff,
+		MaxBackoff:              cfg.IngesterMaxBackoff,
 		ReorgConfirmationWindow: cfg.ReorgConfirmationWindow,
 		ReorgRescanInterval:     cfg.ReorgRescanInterval,
+		SkipContracts:           cfg.SkipContracts,
 		Network:                 cfg.Network,
 	}).WithBroadcaster(bcast)
 	ing.SetNotifier(wh)
@@ -280,6 +505,10 @@ func run() error {
 	// decode/persist land in the dead_letters table instead of
 	// stalling the cycle (issue #131).
 	ing.SetDeadLetterSink(st)
+	// Exposes the adaptive poll interval via /stats (issue #146). Always
+	// registered — there is exactly one Ingester per process even when
+	// INGESTION_LOCK_ENABLED causes its Run loop to be skipped.
+	api.SetIngester(ing)
 
 	// SIGHUP config hot-reload (issue #148): re-reads and validates the
 	// full environment on every SIGHUP, then applies only the safe subset
@@ -332,9 +561,9 @@ func run() error {
 		// to parse logs to see pass/finding rates.
 		api.SetAuditor(aud)
 	}
-	var pruner *store.RetentionPruner
+	var retPruner *store.RetentionPruner
 	if cfg.RetentionAge > 0 {
-		pruner = store.NewRetentionPruner(st, log, store.RetentionOptions{
+		retPruner = store.NewRetentionPruner(pg, log, store.RetentionOptions{
 			Age:          cfg.RetentionAge,
 			PollInterval: cfg.RetentionPoll,
 		})
@@ -374,6 +603,9 @@ func run() error {
 		)
 	}
 
+	// Expose spec-cache hit/miss metrics via /stats.
+	api.SetSpecCache(specCache)
+
 	prn := pruner.NewWithArchiver(st, log, pruner.Options{
 		MaxAge:             cfg.RetentionMaxAge,
 		MinLedger:          cfg.RetentionMinLedger,
@@ -385,6 +617,7 @@ func run() error {
 	if cfg.RetentionEnabled() {
 		api.SetPruner(prn)
 	}
+
 	// Per-client HTTP rate limiter. Disabled when RATE_LIMIT_RPS or
 	// RATE_LIMIT_BURST is unset; the limiter is then a pass-through and
 	// its cleanup goroutine is never started.
@@ -412,12 +645,23 @@ func run() error {
 	api.SetMaxLimit(cfg.APIMaxLimit)
 
 	apiServer := api.New(apiStore, countingClient, log, cfg.APIKey, specEnricher).WithBroadcaster(bcast)
+	// A spec override written here changes what a contract decodes to, so
+	// the other replicas have to be told — otherwise they keep serving the
+	// old spec until their own cache expires.
+	if pg != nil {
+		apiServer.SetSpecInvalidationPublisher(pg)
+	}
 	apiServer.SetStatsTTL(cfg.StatsCacheTTL)
 	apiServer.SetRateLimiter(limiter)
+	if cfg.APIKeyAuthEnabled {
+		log.Info("api key authentication enabled", "gated", "write/streaming/subscriptions routes")
+	}
+	apiServer.WithAPIKeyAuth(cfg.APIKeyAuthEnabled)
 	apiServer.SetMetricsEnabled(cfg.MetricsEnabled)
 	apiServer.SetCompressMinSize(cfg.CompressMinSize)
 	apiServer.SetHTTPRequestBodyLimit(cfg.HTTPRequestBodyLimit)
 	apiServer.SetExportMaxRange(cfg.ExportMaxRange)
+	apiServer.SetDefaultNetwork(cfg.Network)
 	apiServer.SetCORSConfig(api.CORSConfig{
 		AllowedOrigins: cfg.CORSAllowedOrigins,
 		AllowedMethods: cfg.CORSAllowedMethods,
@@ -436,7 +680,7 @@ func run() error {
 	apiServer.SetGraphQLHandler(gqlHandler, gqlHandler.PlaygroundHandler())
 
 	if cfg.MultiTenant {
-		// Tenancy lives in tables (tenants, grants, api_keys, usage) that
+		// Tenancy lives in tables (tenants, grants, tenant_api_keys, usage) that
 		// only the Postgres backend has. Refusing at startup is the whole
 		// point: silently running a ClickHouse deployment with MULTI_TENANT
 		// set would mean an operator believing a boundary is enforced when
@@ -479,10 +723,11 @@ func run() error {
 		log.Info("cors enabled", "origins", strings.Join(cfg.CORSAllowedOrigins, ","))
 	}
 
-	errCh := make(chan error, 5)
-	go func() {
-		go wh.Run(ctx)
-	}()
+	// Six reporters can write here: http, webhook, ingester, auditor,
+	// retention pruner, and pruner. The buffer must hold all of them so
+	// no goroutine parks on a send while shutdown is still draining.
+	errCh := make(chan error, 6)
+	go runWebhook(ctx, wh, errCh)
 
 	// Start the ingester only when the advisory lock was acquired (or
 	// when lock enforcement is disabled). The goroutine is skipped
@@ -491,7 +736,8 @@ func run() error {
 	if ingesterEnabled {
 		remaining++ // + ingester
 		go func() {
-			log.Info("ingester starting", "rpc_urls", rpcURLsForLog(cfg), "poll_interval", cfg.PollInterval)
+			log.Info("ingester starting", requestid.Field, requestid.JobIngester,
+				"rpc_urls", rpcURLsForLog(cfg), "poll_interval", cfg.PollInterval)
 			if err := ing.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				errCh <- fmt.Errorf("ingester: %w", err)
 			} else {
@@ -513,7 +759,7 @@ func run() error {
 	if aud != nil {
 		remaining++ // + auditor
 		go func() {
-			log.Info("auditor starting",
+			log.Info("auditor starting", requestid.Field, requestid.JobAuditor,
 				"budget_share", cfg.AuditBudgetShare,
 				"batch_ledgers", cfg.AuditBatchLedgers,
 				"lag_threshold", cfg.AuditLagThreshold,
@@ -525,10 +771,11 @@ func run() error {
 			}
 		}()
 	}
-	if pruner != nil {
+	if retPruner != nil {
+		remaining++ // + age-based retention pruner
 		go func() {
 			log.Info("event retention pruning starting", "age", cfg.RetentionAge, "poll_interval", cfg.RetentionPoll)
-			if err := pruner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := retPruner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				errCh <- fmt.Errorf("retention pruner: %w", err)
 			} else {
 				errCh <- nil
@@ -541,7 +788,7 @@ func run() error {
 	remaining++ // + pruner
 	go func() {
 		if cfg.RetentionEnabled() {
-			log.Info("pruner starting",
+			log.Info("pruner starting", requestid.Field, requestid.JobPruner,
 				"max_age", cfg.RetentionMaxAge,
 				"min_ledger", cfg.RetentionMinLedger,
 				"batch_size", cfg.RetentionBatchSize,
@@ -555,13 +802,35 @@ func run() error {
 		}
 	}()
 
+	// A nil report is a component that finished cleanly before any
+	// shutdown was requested — the disabled pruner emits one the moment
+	// it starts. Reading that as "a component died" used to tear the
+	// process down a second after boot. Only the shutdown signal or a
+	// non-nil report ends the loop; every report, nil or not, consumes
+	// exactly one slot of the accounting above, so the drain below waits
+	// for precisely the messages that are still outstanding.
 	var firstErr error
-	select {
-	case <-ctx.Done():
-		log.Info("shutdown signal received")
-	case firstErr = <-errCh:
-		remaining--
-		stop()
+	stopping := false
+	for !stopping {
+		select {
+		case <-ctx.Done():
+			log.Info("shutdown signal received")
+			// Drop the SIGINT/SIGTERM registration right away: from
+			// here on a second signal takes the runtime's default
+			// action and forces immediate exit, instead of being
+			// swallowed while a stuck drain runs out the grace
+			// period. stop() is idempotent with the deferred call
+			// at function exit.
+			stop()
+			stopping = true
+		case err := <-errCh:
+			remaining--
+			if err != nil {
+				firstErr = err
+				stop()
+				stopping = true
+			}
+		}
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -576,6 +845,109 @@ func run() error {
 	}
 	log.Info("shutdown complete")
 	return firstErr
+}
+
+// watchListOverrideStore supplies the environment-configured watch list
+// to a dry-run without writing those rows to the store. The embedded Store
+// still provides the read methods needed to resolve the existing cursor and
+// filter state.
+type watchListOverrideStore struct {
+	store.Store
+	watched []store.WatchedContract
+}
+
+func (s watchListOverrideStore) ListWatchedContracts(ctx context.Context) ([]store.WatchedContract, error) {
+	existing, err := s.Store.ListWatchedContracts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]store.WatchedContract(nil), existing...)
+	seen := make(map[string]struct{}, len(out)+len(s.watched))
+	for _, contract := range out {
+		seen[contract.ContractID] = struct{}{}
+	}
+	for _, contract := range s.watched {
+		if _, ok := seen[contract.ContractID]; ok {
+			continue
+		}
+		seen[contract.ContractID] = struct{}{}
+		out = append(out, contract)
+	}
+	return out, nil
+}
+
+// GetIngestionStateForNetwork preserves the ingester's optional network-
+// scoped state seam when the underlying store provides it. Without this
+// method, wrapping a store for WATCHED_CONTRACTS would accidentally make
+// the preview read the unscoped/default network instead.
+func (s watchListOverrideStore) GetIngestionStateForNetwork(ctx context.Context, network string) (store.IngestionState, error) {
+	if scoped, ok := s.Store.(interface {
+		GetIngestionStateForNetwork(context.Context, string) (store.IngestionState, error)
+	}); ok {
+		return scoped.GetIngestionStateForNetwork(ctx, network)
+	}
+	return s.GetIngestionState(ctx)
+}
+
+func watchedContracts(ids []string, network string) []store.WatchedContract {
+	out := make([]store.WatchedContract, len(ids))
+	for i, id := range ids {
+		out[i] = store.WatchedContract{ContractID: id, Network: network}
+	}
+	return out
+}
+
+func newRPCClient(cfg config.Config, log *slog.Logger) rpc.Client {
+	return rpc.NewRetryClient(
+		rpc.NewHTTPClient(
+			cfg.RPCURL,
+			rpc.WithRateLimitRPS(cfg.RPCRateLimit),
+			rpc.WithHTTPTimeout(cfg.RPCHTTPTimeout),
+		),
+		rpc.RetryConfig{
+			MaxAttempts: cfg.RPCMaxAttempts,
+			BaseBackoff: cfg.RPCBaseBackoff,
+			MaxBackoff:  cfg.RPCMaxBackoff,
+			Jitter:      cfg.RPCJitter,
+			Logger:      log,
+		})
+}
+
+func ingesterOptionsFromConfig(cfg config.Config, dryRun bool) ingester.Options {
+	return ingester.Options{
+		PollInterval:            cfg.PollInterval,
+		PollIntervalMin:         cfg.PollIntervalMin,
+		PollIntervalMax:         cfg.PollIntervalMax,
+		StartLedger:             cfg.StartLedger,
+		StartLedgerRaw:          cfg.StartLedgerRaw,
+		RetentionLedgers:        cfg.RetentionLedgers,
+		PageLimit:               cfg.IngestPageSize,
+		WriteBatchSize:          cfg.IngestBatchSize,
+		LagWarnLedgers:          cfg.LagWarnLedgers,
+		SweepConcurrency:        cfg.SweepConcurrency,
+		MaxEventsPerCycle:       cfg.MaxEventsPerCycle,
+		BatchSize:               cfg.BatchSize,
+		BatchTargetLatency:      cfg.BatchTargetLatency,
+		BatchMaxBackoff:         cfg.BatchMaxBackoff,
+		MinBackoff:              cfg.IngesterMinBackoff,
+		MaxBackoff:              cfg.IngesterMaxBackoff,
+		ReorgConfirmationWindow: cfg.ReorgConfirmationWindow,
+		ReorgRescanInterval:     cfg.ReorgRescanInterval,
+		Network:                 cfg.Network,
+		DryRun:                  dryRun,
+	}
+}
+
+// runWebhook runs the webhook delivery pool and reports its result to
+// errCh. The pool counts toward shutdown accounting (remaining in run),
+// so the report is not optional: Notifier.Run returns as soon as ctx is
+// cancelled, and the drain loop below waits for exactly one message per
+// component. The webhook used to be launched without a report, which
+// left the drain waiting for a component that never spoke — every
+// graceful shutdown hung until SIGKILL (issue #1002).
+func runWebhook(ctx context.Context, wh *webhook.Notifier, errCh chan<- error) {
+	wh.Run(ctx)
+	errCh <- nil
 }
 
 // bootstrapAdminKey installs MULTI_TENANT_BOOTSTRAP_KEY as a credential for
@@ -602,7 +974,7 @@ func bootstrapAdminKey(ctx context.Context, ts store.TenantStore, key string, lo
 	if err != nil {
 		return fmt.Errorf("loading default tenant: %w", err)
 	}
-	err = ts.CreateAPIKeyIfAbsent(ctx, tenant.ID, "bootstrap", prefix, digest)
+	err = ts.CreateTenantAPIKeyIfAbsent(ctx, tenant.ID, "bootstrap", prefix, digest)
 	if err != nil {
 		return fmt.Errorf("installing bootstrap key: %w", err)
 	}
@@ -637,8 +1009,6 @@ func newLoggerWithLevel(level, format string) (*slog.Logger, *slog.LevelVar) {
 		h = slog.NewTextHandler(os.Stdout, opts)
 	}
 	return slog.New(h), &levelVar
-	opts := &slog.HandlerOptions{Level: config.ParseLogLevel(level)}
-	return slog.New(config.NewLogHandler(os.Stdout, format, opts))
 }
 
 // graphqlServerDeps wraps the live store + enricher into the typed

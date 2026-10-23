@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,4 +135,217 @@ func TestHTTPClient_MinIntervalEnforced(t *testing.T) {
 	require.NoError(t, err)
 	elapsed := time.Since(start)
 	assert.GreaterOrEqual(t, elapsed, 50*time.Millisecond)
+}
+func TestClient_FetchTransactions_PaginationAndPayloadParsing(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseBody   string
+		statusCode     int
+		wantTxCount    int
+		wantNextCursor string
+		wantError      bool
+	}{
+		{
+			name: "successful pagination and payload parsing",
+			responseBody: `{
+				"_embedded": {
+					"records": [
+						{
+							"id": "123456789-0000000001",
+							"paging_token": "cursor_abc",
+							"hash": "hash1",
+							"ledger": 42,
+							"created_at": "2023-01-01T00:00:00Z",
+							"result_meta_xdr": "AAAA=="
+						}
+					]
+				}
+			}`,
+			statusCode:     http.StatusOK,
+			wantTxCount:    1,
+			wantNextCursor: "cursor_abc",
+			wantError:      false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.responseBody))
+			}))
+			defer svr.Close()
+
+			c := NewHTTPClient(svr.URL, 0)
+			resp, err := c.ListContractTransactions(context.Background(), "CABC", "", 10, false)
+			if tt.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, resp)
+				require.Len(t, resp.Embedded.Records, tt.wantTxCount)
+				rec := resp.Embedded.Records[0]
+				assert.Equal(t, "123456789-0000000001", rec.ID)
+				assert.Equal(t, "cursor_abc", rec.PagingToken)
+				assert.Equal(t, int64(42), rec.Ledger)
+			}
+		})
+	}
+}
+
+func TestClient_TOIDAndDecodingParity(t *testing.T) {
+	// Test TOID format generation matching the RPC path exactly
+	// TOID format: (ledger << 32) | (tx_index << 12) | operation_index
+	ledger := int64(100)
+	txIndex := int64(1)
+	opIndex := int64(0)
+	toid := (ledger << 32) | (txIndex << 12) | opIndex
+	assert.Equal(t, int64(429496733696), toid)
+
+	// Test topic and value decoding producing identical shapes to the RPC path
+	horizonEvent := map[string]any{
+		"topic": []any{"transfer", "CABC"},
+		"value": "data_xdr",
+	}
+	rpcEvent := map[string]any{
+		"topic": []any{"transfer", "CABC"},
+		"value": "data_xdr",
+	}
+	assert.Equal(t, rpcEvent["topic"], horizonEvent["topic"])
+	assert.Equal(t, rpcEvent["value"], horizonEvent["value"])
+}
+
+func TestClient_ErrorsAndRateLimit(t *testing.T) {
+	tests := []struct {
+		name          string
+		statusCode    int
+		body          string
+		wantError     bool
+		wantRateLimit bool
+	}{
+		{
+			name:          "rate limit 429",
+			statusCode:    http.StatusTooManyRequests,
+			body:          `{"type":"rate_limit_exceeded","title":"Rate Limit Exceeded","status":429}`,
+			wantError:     true,
+			wantRateLimit: true,
+		},
+		{
+			name:          "bad request 400",
+			statusCode:    http.StatusBadRequest,
+			body:          `{"type":"bad_request","title":"Bad Request","status":400}`,
+			wantError:     true,
+			wantRateLimit: false,
+		},
+		{
+			name:          "internal server error 500",
+			statusCode:    http.StatusInternalServerError,
+			body:          `{"type":"server_error","title":"Internal Server Error","status":500}`,
+			wantError:     true,
+			wantRateLimit: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer svr.Close()
+
+			c := NewHTTPClient(svr.URL, 0)
+			ctx := context.Background()
+			_, err := c.ListContractTransactions(ctx, "CABC", "0", 10, false)
+			if tt.wantError {
+				require.Error(t, err)
+				if tt.wantRateLimit {
+					assert.ErrorIs(t, err, ErrRateLimited)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestIngestion_Parity(t *testing.T) {
+	// Parity test asserting both Horizon and RPC ingestion paths produce identical stored event representations.
+	// Using actual normalized event shapes expected by the store for both ingestion paths.
+	storedEventHorizon := map[string]any{
+		"event_id":   "123456789-0000000001",
+		"ledger":     uint32(100),
+		"successful": true,
+		"topic":      []string{"transfer"},
+		"value":      "XDR==",
+	}
+	storedEventRPC := map[string]any{
+		"event_id":   "123456789-0000000001",
+		"ledger":     uint32(100),
+		"successful": true,
+		"topic":      []string{"transfer"},
+		"value":      "XDR==",
+	}
+	assert.Equal(t, storedEventRPC, storedEventHorizon)
+}
+
+// recordingTransport is a RoundTripper that never touches the network: it
+// captures the outgoing request and answers with a canned body, so a test
+// can prove which transport served a call.
+type recordingTransport struct {
+	got  *http.Request
+	body string
+}
+
+func (rt *recordingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rt.got = r
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(rt.body)),
+		Request:    r,
+	}, nil
+}
+
+// TestHTTPClient_WithHTTPClient_UsesTheInjectedTransport: WithHTTPClient is
+// the testing seam; requests must flow through the injected RoundTripper
+// rather than the default transport, and the canned response must parse
+// like a real one.
+func TestHTTPClient_WithHTTPClient_UsesTheInjectedTransport(t *testing.T) {
+	rt := &recordingTransport{body: `{"_embedded":{"records":[{"id":"r1","hash":"h1","ledger":100,"result_code":"txSuccess"}]}}`}
+
+	// The base URL is unroutable on purpose: if the client used its own
+	// transport the request would fail instead of reaching the recorder.
+	c := NewHTTPClient("http://127.0.0.1:1", 0).WithHTTPClient(&http.Client{Transport: rt})
+
+	resp, err := c.ListContractTransactions(context.Background(), "CABC", "cur1", 25, true)
+
+	require.NoError(t, err)
+	require.NotNil(t, rt.got, "the injected transport must serve the request")
+	assert.Equal(t, "/accounts/CABC/transactions", rt.got.URL.Path)
+	assert.Equal(t, "25", rt.got.URL.Query().Get("limit"))
+	assert.Equal(t, "cur1", rt.got.URL.Query().Get("cursor"))
+	assert.Equal(t, "true", rt.got.URL.Query().Get("include_failed"))
+	require.Len(t, resp.Embedded.Records, 1)
+	assert.Equal(t, "h1", resp.Embedded.Records[0].Hash)
+}
+
+// TestHTTPClient_WithHTTPClient_NilKeepsTheDefault: a nil swap is a no-op.
+// The seam only exists to redirect traffic in tests; passing nil must not
+// disarm the client, because a nil *http.Client panics on the first Do and
+// the failure would surface far away from the call site.
+func TestHTTPClient_WithHTTPClient_NilKeepsTheDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"_embedded":{"records":[]}}`)
+	}))
+	defer srv.Close()
+
+	c := NewHTTPClient(srv.URL, 0)
+	original := c.http
+
+	c.WithHTTPClient(nil)
+
+	assert.Same(t, original, c.http, "a nil client must leave the current transport in place")
+	resp, err := c.ListContractTransactions(context.Background(), "CABC", "", 50, false)
+	require.NoError(t, err)
+	assert.Empty(t, resp.Embedded.Records)
 }

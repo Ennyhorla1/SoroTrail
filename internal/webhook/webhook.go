@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/sorotrail/sorotrail/internal/requestid"
 	"github.com/sorotrail/sorotrail/internal/store"
 )
 
@@ -51,6 +52,20 @@ const (
 	SignatureHeader = "X-SoroTrail-Signature"
 )
 
+// Clock abstracts the retry sleep. Production uses RealClock; tests inject a
+// recording clock so the backoff schedule is asserted without real timers —
+// mirroring ingester.Clock's single sleep seam.
+type Clock interface {
+	// SleepCtx sleeps for d or until ctx is done; it reports whether the
+	// full sleep completed.
+	SleepCtx(ctx context.Context, d time.Duration) bool
+}
+
+// RealClock is the wall-clock implementation of Clock.
+type RealClock struct{}
+
+func (RealClock) SleepCtx(ctx context.Context, d time.Duration) bool { return sleepCtx(ctx, d) }
+
 // Notifier receives events from the ingester and queues matching
 // subscriptions for delivery. It implements ingester.EventNotifier.
 type Notifier struct {
@@ -61,6 +76,7 @@ type Notifier struct {
 	client      *http.Client
 	maxAttempts int
 	backoffFunc func(attempt int) time.Duration
+	clock       Clock
 }
 
 // deliveryTask is one event destined for one subscription.
@@ -82,13 +98,16 @@ func NewNotifier(st store.Store, log *slog.Logger) *Notifier {
 	queue := make(chan deliveryTask, WorkerQueueSize)
 	client := &http.Client{Timeout: DeliveryTimeout}
 	n := &Notifier{
-		store:       st,
-		queue:       queue,
-		sendOnly:    queue,
-		log:         log,
+		store:    st,
+		queue:    queue,
+		sendOnly: queue,
+		// Deliveries are background work; tagging their log lines with a
+		// stable job id keeps the correlation field meaningful for them too.
+		log:         log.With(requestid.Field, requestid.JobWebhook),
 		client:      client,
 		maxAttempts: MaxDeliveryAttempts,
 		backoffFunc: backoffDuration,
+		clock:       RealClock{},
 	}
 	return n
 }
@@ -140,6 +159,9 @@ func (n *Notifier) NotifyEvents(ctx context.Context, events []store.Event) {
 // Run starts the worker pool and blocks until ctx is cancelled. Workers
 // drain the delivery queue and POST events to subscriber URLs.
 func (n *Notifier) Run(ctx context.Context) {
+	// Carry the job id on the context so delivery-time store writes are
+	// tagged with "webhook" in their slow-query logs.
+	ctx = requestid.WithJob(ctx, requestid.JobWebhook)
 	n.log.Info("webhook delivery workers starting",
 		"workers", NumWorkers, "queue_size", WorkerQueueSize)
 	for i := 0; i < NumWorkers; i++ {
@@ -197,7 +219,7 @@ func (n *Notifier) deliverWithRetry(ctx context.Context, task deliveryTask) {
 				"event_id", task.Event.ID,
 				"attempt", attempt+1,
 				"backoff", backoff)
-			if !sleepCtx(ctx, backoff) {
+			if !n.clock.SleepCtx(ctx, backoff) {
 				span.End()
 				return
 			}
