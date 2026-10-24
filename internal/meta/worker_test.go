@@ -182,7 +182,6 @@ func TestResolveMetadata_Cases(t *testing.T) {
 	}
 }
 
-
 func TestNewWorker(t *testing.T) {
 	w := NewWorker()
 	require.NotNil(t, w, "NewWorker() should return a non-nil worker instance")
