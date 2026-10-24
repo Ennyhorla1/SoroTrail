@@ -21,6 +21,34 @@ import (
 	"github.com/sorotrail/sorotrail/internal/store"
 )
 
+func TestParseExportFormat(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    exportFormat
+		wantErr bool
+	}{
+		{name: "csv", raw: "csv", want: formatCSV},
+		{name: "ndjson", raw: "ndjson", want: formatNDJSON},
+		{name: "empty defaults to csv", want: formatCSV},
+		{name: "case and whitespace insensitive", raw: " NdJsOn ", want: formatNDJSON},
+		{name: "unknown format", raw: "xml", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseExportFormat(tt.raw)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // seedEvents returns events at ledgers 100..103 in a stable order. The
 // topics and value are intentionally JSON shapes that exercise CSV
 // escaping/quoting (commas, quotes) so a regression in the writer is

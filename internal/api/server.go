@@ -412,7 +412,7 @@ func (s *Server) retentionWindow() uint32 {
 	if s.retentionLedgers > 0 {
 		return s.retentionLedgers
 	}
-	return 17280
+	return ingester.DefaultRetentionLedgers
 }
 
 // SetCORSConfig wires the CORS middleware. The default (zero-valued

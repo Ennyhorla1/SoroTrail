@@ -349,6 +349,97 @@ func TestScvAmount(t *testing.T) {
 	}
 }
 
+func TestScvAddress(t *testing.T) {
+	// Real, checksummed strkeys: GA... is an account, CD... a contract.
+	const (
+		accountStrkey  = "GA7QNFHD3FJ3G7P46RRXNM6J6YBGQKJ3QLCZMVFCB5QRJEMJXVLVL3J5"
+		contractStrkey = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+	)
+
+	tests := []struct {
+		name   string
+		input  json.RawMessage
+		want   string
+		wantOK bool
+	}{
+		{
+			// Address filtering and the address index both key off this
+			// string, so a mangled prefix would silently split one
+			// account's history in two; the G prefix must survive intact.
+			name:   "account address yields a G-prefixed strkey",
+			input:  json.RawMessage(`{"address":"` + accountStrkey + `"}`),
+			want:   accountStrkey,
+			wantOK: true,
+		},
+		{
+			name:   "contract address yields a C-prefixed strkey",
+			input:  json.RawMessage(`{"address":"` + contractStrkey + `"}`),
+			want:   contractStrkey,
+			wantOK: true,
+		},
+		{
+			name:   "non-address symbol is rejected rather than returning a partial string",
+			input:  json.RawMessage(`{"symbol":"transfer"}`),
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "non-address integer is rejected rather than returning a partial string",
+			input:  json.RawMessage(`{"u64":42}`),
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "non-string address value is rejected",
+			input:  json.RawMessage(`{"address":42}`),
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "missing address key is rejected",
+			input:  json.RawMessage(`{}`),
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "nil value does not panic and is rejected",
+			input:  nil,
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "zero-length value does not panic and is rejected",
+			input:  json.RawMessage(``),
+			want:   "",
+			wantOK: false,
+		},
+		{
+			name:   "invalid JSON is rejected",
+			input:  json.RawMessage(`not json`),
+			want:   "",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			var ok bool
+			assert.NotPanics(t, func() {
+				got, ok = scvAddress(tt.input)
+			})
+			assert.Equal(t, tt.wantOK, ok, "ok flag")
+			assert.Equal(t, tt.want, got, "extracted address")
+			if tt.wantOK {
+				// A strkey is a version byte, a 32-byte payload and a
+				// 2-byte checksum base32-encoded, so every address the
+				// decoder hands on is exactly 56 characters.
+				assert.Len(t, got, 56, "strkey length")
+			}
+		})
+	}
+}
+
 func TestParseTokenEvent_ZeroAmount(t *testing.T) {
 	topics := json.RawMessage(`[
 		{"symbol": "mint"},
