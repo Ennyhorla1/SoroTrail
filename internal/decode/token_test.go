@@ -440,7 +440,6 @@ func TestScvAddress(t *testing.T) {
 	}
 }
 
-
 func TestParseTokenEvent_ZeroAmount(t *testing.T) {
 	topics := json.RawMessage(`[
 		{"symbol": "mint"},
