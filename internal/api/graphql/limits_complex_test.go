@@ -5,21 +5,12 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/vektah/gqlparser/v2/ast"
-	"github.com/vektah/gqlparser/v2/parser"
 )
 
 // parseOp walks a GraphQL string and returns the first Query OperationDefinition.
 // It mirrors the helper in limits_test.go so the two files can be cherry-picked
 // independently; the table does not depend on the test file's copy of the
 // scorer.
-func parseOp(t *testing.T, q string) *ast.OperationDefinition {
-	t.Helper()
-	doc, err := parser.ParseQuery(&ast.Source{Name: "test", Input: q})
-	require.NoError(t, err)
-	require.NotEmpty(t, doc.Operations)
-	return doc.Operations[0]
-}
 
 // TestCheckComplexity_Table drives the full complexity surface through the real
 // production scorer (CheckComplexity) so the table pins the exact scores, the
@@ -37,7 +28,7 @@ func TestCheckComplexity_Table(t *testing.T) {
 		{
 			name:      "simple query scores at the leaf + operation cost",
 			query:     `{ events { totalCount } }`,
-			wantScore: 25 + 5, // connection(25) + operation(5)
+			wantScore: 25 + 1 + 5, // events(25) + totalCount(1) + operation(5)
 		},
 		{
 			name:      "list-limit scaling: more rows scale the connection",
