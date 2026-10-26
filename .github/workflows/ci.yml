@@ -554,7 +554,7 @@ jobs:
   monitoring:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # promtool ships with Prometheus; pin a release here the same way
       # the lint job pins golangci-lint rather than tracking latest.
       - name: Install promtool
