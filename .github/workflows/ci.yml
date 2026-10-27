@@ -699,3 +699,7 @@ jobs:
             fi
           done
           exit "$status"
+
+      - name: Verify reproducible binary build
+        if: steps.scope.outputs.run == 'true'
+        run: ./scripts/verify_reproducible_build.sh
