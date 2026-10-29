@@ -178,6 +178,33 @@ func (p *Postgres) ScopeForTenant(ctx context.Context, t Tenant) (Scope, error) 
 	return NewScope(ids), nil
 }
 
+// The two counts AddTenantWatchedContract enforces its caps with. They are
+// constants shared with the reporting methods below so that the headroom a
+// tenant is shown is measured exactly the way the limit is applied.
+const (
+	countTenantWatchedSQL   = `SELECT count(*) FROM tenant_watched_contracts WHERE tenant_id = $1`
+	countInstanceWatchedSQL = `SELECT count(*) FROM (` + watchedContractsUnion + `) u`
+)
+
+// CountTenantWatchedContracts returns how many contracts the tenant watches.
+func (p *Postgres) CountTenantWatchedContracts(ctx context.Context, tenantID int64) (int, error) {
+	var n int
+	if err := p.pool.QueryRow(ctx, countTenantWatchedSQL, tenantID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting tenant watch list: %w", err)
+	}
+	return n, nil
+}
+
+// CountInstanceWatchedContracts returns the size of the union of every watch
+// list, which is what the instance-wide cap bounds.
+func (p *Postgres) CountInstanceWatchedContracts(ctx context.Context) (int, error) {
+	var n int
+	if err := p.pool.QueryRow(ctx, countInstanceWatchedSQL).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting watched union: %w", err)
+	}
+	return n, nil
+}
+
 // AddTenantWatchedContract adds a contract to the tenant's watch list,
 // enforcing the tenant's own cap and the instance-wide cap.
 //
@@ -206,9 +233,7 @@ func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, netwo
 
 	if t.MaxWatchedContracts != nil {
 		var held int
-		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM tenant_watched_contracts WHERE tenant_id = $1`,
-			t.ID).Scan(&held); err != nil {
+		if err := tx.QueryRow(ctx, countTenantWatchedSQL, t.ID).Scan(&held); err != nil {
 			return fmt.Errorf("counting tenant watch list: %w", err)
 		}
 		if held >= *t.MaxWatchedContracts {
@@ -224,8 +249,7 @@ func (p *Postgres) AddTenantWatchedContract(ctx context.Context, t Tenant, netwo
 		// another tenant already watches on this network is therefore free
 		// to add.
 		var unionSize int
-		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM (`+watchedContractsUnion+`) u`).Scan(&unionSize); err != nil {
+		if err := tx.QueryRow(ctx, countInstanceWatchedSQL).Scan(&unionSize); err != nil {
 			return fmt.Errorf("counting watched union: %w", err)
 		}
 		var alreadyWatched int

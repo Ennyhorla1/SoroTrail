@@ -602,3 +602,72 @@ func watchedContractIDs(t *testing.T, p *Postgres) []string {
 	}
 	return ids
 }
+
+// The headroom the API reports (#1157) is counted with the same queries
+// AddTenantWatchedContract enforces its caps with, so what a tenant is told it
+// holds is exactly what the limit compares against.
+func TestWatchedContracts_CountsAgreeWithTheEnforcedCaps(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a tenant's count tracks adds and stops at its cap", func(t *testing.T) {
+		p := testTenantStore(t)
+		limit := 2
+		tenant, err := p.CreateTenant(ctx, Tenant{Name: "capped", Enabled: true, MaxWatchedContracts: &limit})
+		require.NoError(t, err)
+
+		n, err := p.CountTenantWatchedContracts(ctx, tenant.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 0, n, "an empty watch list")
+
+		require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "", contractA, 0))
+		require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "", contractB, 0))
+		n, err = p.CountTenantWatchedContracts(ctx, tenant.ID)
+		require.NoError(t, err)
+		assert.Equal(t, limit, n, "exactly at the cap")
+
+		// The add that the cap refuses leaves the count where it was.
+		require.ErrorIs(t, p.AddTenantWatchedContract(ctx, tenant, "", contractC, 0), ErrQuotaExceeded)
+		n, err = p.CountTenantWatchedContracts(ctx, tenant.ID)
+		require.NoError(t, err)
+		assert.Equal(t, limit, n)
+
+		// An idempotent re-add does not inflate it.
+		require.NoError(t, p.AddTenantWatchedContract(ctx, tenant, "", contractA, 0))
+		n, err = p.CountTenantWatchedContracts(ctx, tenant.ID)
+		require.NoError(t, err)
+		assert.Equal(t, limit, n)
+	})
+
+	t.Run("a tenant's count excludes other tenants' claims", func(t *testing.T) {
+		p := testTenantStore(t)
+		one := mustTenant(t, p, "one")
+		two := mustTenant(t, p, "two")
+		require.NoError(t, p.AddTenantWatchedContract(ctx, one, "", contractA, 0))
+		require.NoError(t, p.AddTenantWatchedContract(ctx, two, "", contractA, 0))
+		require.NoError(t, p.AddTenantWatchedContract(ctx, two, "", contractB, 0))
+
+		n, err := p.CountTenantWatchedContracts(ctx, one.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+	})
+
+	t.Run("the instance count is the union the instance cap bounds", func(t *testing.T) {
+		p := testTenantStore(t)
+		one := mustTenant(t, p, "one")
+		two := mustTenant(t, p, "two")
+
+		require.NoError(t, p.AddTenantWatchedContract(ctx, one, "", contractA, 2))
+		require.NoError(t, p.AddTenantWatchedContract(ctx, two, "", contractA, 2))
+		n, err := p.CountInstanceWatchedContracts(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n, "two tenants watching one contract is one entry in the union")
+
+		require.NoError(t, p.AddTenantWatchedContract(ctx, two, "", contractB, 2))
+		n, err = p.CountInstanceWatchedContracts(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, 2, n, "at the cap of 2")
+
+		// The count says full, and the enforcement agrees.
+		assert.ErrorIs(t, p.AddTenantWatchedContract(ctx, one, "", contractC, 2), ErrQuotaExceeded)
+	})
+}

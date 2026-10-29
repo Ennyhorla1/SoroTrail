@@ -1154,7 +1154,11 @@
                       "events_served": 67890,
                       "stream_seconds": 3600
                     }
-                  ]
+                  ],
+                  "watched_contracts": {
+                    "held": 7,
+                    "limit": 10
+                  }
                 }
               }
             }
@@ -3351,7 +3355,7 @@
       "get": {
         "operationId": "currentTenantUsage",
         "summary": "Usage for the calling tenant",
-        "description": "Recorded request, event-served and stream-time counters for the caller.",
+        "description": "Recorded request, event-served and stream-time counters for the caller, and how much of its watch-list cap it is using, so a tenant can see it is close before `POST /tenant/watch` starts returning 429.",
         "tags": [
           "Operations"
         ],
@@ -3389,7 +3393,11 @@
                       "events_served": 67890,
                       "stream_seconds": 3600
                     }
-                  ]
+                  ],
+                  "watched_contracts": {
+                    "held": 7,
+                    "limit": 10
+                  }
                 }
               }
             }
@@ -5558,10 +5566,32 @@
           }
         }
       },
+      "WatchHeadroom": {
+        "type": "object",
+        "description": "How much of a watch-list cap is in use. `limit` is null when there is no cap.",
+        "required": [
+          "held",
+          "limit"
+        ],
+        "properties": {
+          "held": {
+            "type": "integer",
+            "minimum": 0,
+            "example": 7
+          },
+          "limit": {
+            "type": "integer",
+            "nullable": true,
+            "minimum": 0,
+            "example": 10
+          }
+        }
+      },
       "UsagePage": {
         "type": "object",
         "required": [
-          "usage"
+          "usage",
+          "watched_contracts"
         ],
         "properties": {
           "usage": {
@@ -5569,6 +5599,26 @@
             "items": {
               "$ref": "#/components/schemas/TenantUsage"
             }
+          },
+          "watched_contracts": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WatchHeadroom"
+              }
+            ],
+            "description": "The tenant's own watch list: contracts held against its `max_watched_contracts`. `POST /tenant/watch` returns 429 once `held` reaches `limit`; a null `limit` means the tenant has no cap of its own (the instance-wide cap still applies)."
+          },
+          "instance_watch_list_full": {
+            "type": "boolean",
+            "description": "Tenant view only, and only when the instance has a watch-list cap. True when the instance-wide watch list is full, so adding a contract that no tenant already watches would be refused. The instance total is deliberately not given: it is aggregate usage across every tenant."
+          },
+          "instance_watched_contracts": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WatchHeadroom"
+              }
+            ],
+            "description": "Admin view only (`GET /admin/tenants/{id}/usage`): distinct contracts watched across the whole instance against `MULTI_TENANT_MAX_WATCHED`."
           }
         }
       },

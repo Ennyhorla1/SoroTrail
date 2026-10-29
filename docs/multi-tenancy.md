@@ -178,10 +178,43 @@ with.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/tenant` | Identity, grants, quotas |
-| `GET` | `/tenant/usage?days=N` | Own usage (flushes pending counters first) |
+| `GET` | `/tenant/usage?days=N` | Own usage and watch-list headroom (flushes pending counters first) |
 | `GET` | `/tenant/watch` | Own watch list |
 | `POST` | `/tenant/watch` | Ask for a contract to be indexed |
 | `DELETE` | `/tenant/watch/{contract_id}` | Drop the request |
+
+## Watch-list headroom
+
+A tenant can add contracts until it reaches its own `max_watched_contracts`, or
+until the instance as a whole reaches `MULTI_TENANT_MAX_WATCHED`; either makes
+`POST /tenant/watch` return `429`. `GET /tenant/usage` reports where the tenant
+stands so it does not have to find out from a failed request:
+
+```json
+{
+  "usage": [],
+  "watched_contracts": { "held": 7, "limit": 10 },
+  "instance_watch_list_full": false
+}
+```
+
+- `watched_contracts.held` is how many contracts the tenant watches, across
+  every network, and `limit` is its `max_watched_contracts`, or `null` when it
+  has no cap of its own. `held` is counted by the same query `POST /tenant/watch`
+  enforces the cap with, so the two cannot disagree.
+- `instance_watch_list_full` is present only when the instance has a cap. It is
+  `true` when adding a contract that no tenant already watches would be refused.
+  Joining a contract another tenant already watches is free (it does not grow
+  what ingestion polls), so a full instance does not stop that.
+
+**Why a tenant gets a flag, not the instance total.** The instance-wide watch
+list is the union of every tenant's, so its size is aggregate usage across
+tenants: exposing the number would tell one tenant how much the others are
+using. The one bit a tenant can act on is whether a new contract would be
+refused, so that is all it is told. The operator's view of a tenant,
+`GET /admin/tenants/{id}/usage`, carries the same `watched_contracts` figures
+for that tenant plus `instance_watched_contracts: {held, limit}` with the
+instance totals (`limit` is `null` when `MULTI_TENANT_MAX_WATCHED` is 0).
 
 ## Watch lists and ingestion
 
