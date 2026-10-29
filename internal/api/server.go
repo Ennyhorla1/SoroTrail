@@ -599,8 +599,9 @@ func (s *Server) router() chi.Router {
 	// (single-object reads) and pass it to the store — see
 	// docs/multi-tenancy.md. Endpoints that skip this return nothing rather
 	// than everything, but "returns nothing" is still a bug.
-	r.Get("/events/count", s.handleCountEvents)
-	r.Get("/contracts/{id}", s.handleGetContract)
+	// Every one of these answers a conditional request: see conditionalGET.
+	r.With(conditionalGET).Get("/events/count", s.handleCountEvents)
+	r.With(conditionalGET).Get("/contracts/{id}", s.handleGetContract)
 	r.Get("/stats", s.handleStats)
 	r.With(protect).Get("/subscriptions/{id}", s.handleGetSubscription)
 
@@ -616,16 +617,19 @@ func (s *Server) router() chi.Router {
 		if s.compressMinSize >= 0 {
 			r.Use(Compress(s.compressMinSize))
 		}
-		r.Get("/events", s.handleListEvents)
-		r.Get("/events/aggregate", s.handleAggregateEvents)
-		r.Get("/events/{id}/raw", s.handleGetEventRaw)
-		r.Get("/events/{id}/transaction", s.handleGetEventTransaction)
-		r.Get("/events/{id}", s.handleGetEvent)
-		r.Get("/contracts", s.handleListContracts)
-		r.Get("/contracts/{id}/events", s.handleContractEvents)
-		r.Get("/contracts/{id}/stats", s.handleContractStats)
-		r.Get("/addresses/{address}/events", s.handleAddressEvents)
-		r.Get("/addresses/{address}/summary", s.handleAddressSummary)
+		// conditionalGET sits inside Compress, so the validator is the hash of
+		// the identity body. Subscriptions, deliveries and the operator watch
+		// list are left out: they are management surfaces, not polled reads.
+		r.With(conditionalGET).Get("/events", s.handleListEvents)
+		r.With(conditionalGET).Get("/events/aggregate", s.handleAggregateEvents)
+		r.With(conditionalGET).Get("/events/{id}/raw", s.handleGetEventRaw)
+		r.With(conditionalGET).Get("/events/{id}/transaction", s.handleGetEventTransaction)
+		r.With(conditionalGET).Get("/events/{id}", s.handleGetEvent)
+		r.With(conditionalGET).Get("/contracts", s.handleListContracts)
+		r.With(conditionalGET).Get("/contracts/{id}/events", s.handleContractEvents)
+		r.With(conditionalGET).Get("/contracts/{id}/stats", s.handleContractStats)
+		r.With(conditionalGET).Get("/addresses/{address}/events", s.handleAddressEvents)
+		r.With(conditionalGET).Get("/addresses/{address}/summary", s.handleAddressSummary)
 		r.With(protect).Get("/subscriptions", s.handleListSubscriptions)
 		r.With(protect).Get("/subscriptions/{id}/deliveries", s.handleListDeliveries)
 		r.With(watchedMW).Get("/watched-contracts", s.handleListWatchedChains)

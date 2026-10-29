@@ -75,6 +75,34 @@ These figures are a reference point, not a guarantee: they depend on the host, t
 
 ---
 
+## Conditional requests
+
+Following a contract means polling its listing, and most polls find nothing
+new. The event, contract and address read endpoints therefore answer
+conditional requests.
+
+- A `200` response carries a strong `ETag`: a hash of the exact response body,
+  so it changes when, and only when, the bytes a client would receive change.
+  Tenant scope, filters, cursor, order and page size all shape the body, so two
+  tenants, or two different queries, never share a validator.
+- Repeat the tag in `If-None-Match` (a single tag, a list, a weak `W/` form or
+  `*`) and an unchanged result comes back as `304 Not Modified` with no body,
+  repeating `ETag`, `Cache-Control` and `Vary`.
+- Live listings keep `Cache-Control: no-cache`, so a client revalidates on
+  every poll; the validator is what makes that revalidation cheap. Windows that
+  end below the ingestion frontier keep their existing immutable caching and
+  their own filter-derived validator.
+- With compression on, the tag is computed on the uncompressed body and
+  weakened for the gzip representation; revalidating with the weak tag still
+  gets a `304`.
+- `/health` and `/stats` change constantly and are never tagged. Errors,
+  non-200 responses, streamed exports and responses over 8 MiB are not tagged.
+
+What this saves is the body: bandwidth and the client's parse. It does not skip
+the database query, because the validator is derived from the response, so the
+handler still runs. A validator that avoids the query would need a store-side
+change counter, which the store does not have today.
+
 ## 1. Methodology
 
 All performance benchmarks are reproducible using the included benchmark suite and database seeding tool.
