@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -337,7 +338,7 @@ func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.writeUsage(w, r, t.ID)
+	s.writeUsage(w, r, t, true)
 }
 
 // whoAmIResponse is the tenant's own view of its account: identity, what it
@@ -365,10 +366,33 @@ func (s *Server) handleOwnUsage(w http.ResponseWriter, r *http.Request) {
 	// Flush first so a tenant checking its own usage sees the requests it
 	// just made rather than a figure up to one interval stale.
 	s.usage.Flush(r.Context())
-	s.writeUsage(w, r, p.Tenant.ID)
+	s.writeUsage(w, r, p.Tenant, false)
 }
 
-func (s *Server) writeUsage(w http.ResponseWriter, r *http.Request, tenantID int64) {
+// watchHeadroom is how much of a watch-list cap is in use. Limit is null when
+// there is no cap: for a tenant, none of its own (it is still bounded by the
+// instance-wide cap); for the instance, none configured.
+type watchHeadroom struct {
+	Held  int  `json:"held"`
+	Limit *int `json:"limit"`
+}
+
+// usageResponse is the body of both usage endpoints.
+//
+// The instance-wide watch list is the union of every tenant's, so its size is
+// aggregate data about other tenants. A tenant is therefore told only the one
+// bit it can act on (InstanceWatchListFull: adding a contract nobody watches
+// yet would be refused), while the operator view carries the numbers.
+type usageResponse struct {
+	Usage                    []store.TenantUsage `json:"usage"`
+	WatchedContracts         watchHeadroom       `json:"watched_contracts"`
+	InstanceWatchListFull    *bool               `json:"instance_watch_list_full,omitempty"`
+	InstanceWatchedContracts *watchHeadroom      `json:"instance_watched_contracts,omitempty"`
+}
+
+// writeUsage writes the tenant's usage counters and its watch-list headroom.
+// operator selects the admin view, which adds the instance-wide numbers.
+func (s *Server) writeUsage(w http.ResponseWriter, r *http.Request, t store.Tenant, operator bool) {
 	days := 30
 	if raw := r.URL.Query().Get("days"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -379,14 +403,52 @@ func (s *Server) writeUsage(w http.ResponseWriter, r *http.Request, tenantID int
 		}
 		days = n
 	}
-	usage, err := s.tenants.ListUsage(r.Context(), tenantID, days)
+	resp, err := s.buildUsage(r.Context(), t, days, operator)
 	if err != nil {
 		loggerFromContext(r.Context()).Error("listing usage", "error", err)
 		writeError(w, http.StatusInternalServerError, errors.New("listing usage failed"))
 		return
 	}
 	writeCacheHeaders(w, cacheNoStore, 0, "")
-	writeJSON(w, http.StatusOK, map[string]any{"usage": usage})
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildUsage assembles the usage report: the day counters, the tenant's
+// watch-list headroom and, depending on the audience, the instance-wide one.
+func (s *Server) buildUsage(ctx context.Context, t store.Tenant, days int, operator bool) (usageResponse, error) {
+	usage, err := s.tenants.ListUsage(ctx, t.ID, days)
+	if err != nil {
+		return usageResponse{}, fmt.Errorf("listing usage counters: %w", err)
+	}
+	held, err := s.tenants.CountTenantWatchedContracts(ctx, t.ID)
+	if err != nil {
+		return usageResponse{}, fmt.Errorf("counting the tenant watch list: %w", err)
+	}
+	resp := usageResponse{
+		Usage:            usage,
+		WatchedContracts: watchHeadroom{Held: held, Limit: t.MaxWatchedContracts},
+	}
+	if s.maxWatched == 0 && !operator {
+		return resp, nil
+	}
+
+	instanceHeld, err := s.tenants.CountInstanceWatchedContracts(ctx)
+	if err != nil {
+		return usageResponse{}, fmt.Errorf("counting the instance watch list: %w", err)
+	}
+	var limit *int
+	if s.maxWatched > 0 {
+		capacity := s.maxWatched
+		limit = &capacity
+		if !operator {
+			full := instanceHeld >= s.maxWatched
+			resp.InstanceWatchListFull = &full
+		}
+	}
+	if operator {
+		resp.InstanceWatchedContracts = &watchHeadroom{Held: instanceHeld, Limit: limit}
+	}
+	return resp, nil
 }
 
 type watchRequest struct {

@@ -115,6 +115,18 @@ type TenantStore interface {
 	RemoveTenantWatchedContract(ctx context.Context, tenantID int64, network, contractID string) error
 	// ListTenantWatchedContracts returns just this tenant's claims on network.
 	ListTenantWatchedContracts(ctx context.Context, tenantID int64, network string) ([]string, error)
+	// CountTenantWatchedContracts returns how many contracts the tenant holds
+	// on its watch list across every network. It is the figure
+	// AddTenantWatchedContract compares with the tenant's own cap, counted by
+	// the same query, so a reported headroom and an enforced limit cannot
+	// disagree.
+	CountTenantWatchedContracts(ctx context.Context, tenantID int64) (int, error)
+	// CountInstanceWatchedContracts returns the size of the union
+	// AddTenantWatchedContract compares with the instance-wide cap: distinct
+	// (network, contract_id) pairs across the global watch list and every
+	// tenant's. It is aggregate data about all tenants, so only the operator
+	// view may expose it as a number.
+	CountInstanceWatchedContracts(ctx context.Context) (int, error)
 
 	// CreateTenantAPIKey stores the digest of secret and returns the key record.
 	CreateTenantAPIKey(ctx context.Context, tenantID int64, name, prefix string, digest []byte) (TenantAPIKey, error)

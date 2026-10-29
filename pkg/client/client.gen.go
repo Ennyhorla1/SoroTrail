@@ -515,7 +515,19 @@ type UpdateSubscriptionRequest struct {
 
 // UsagePage API schema used by the SoroTrail client.
 type UsagePage struct {
-	Usage []TenantUsage `json:"usage"`
+	// InstanceWatchListFull Tenant view only, and only when the instance has a watch-list cap. True when the instance-wide watch list is full, so adding a contract that no tenant already watches would be refused. The instance total is deliberately not given: it is aggregate usage across every tenant.
+	InstanceWatchListFull bool `json:"instance_watch_list_full,omitempty"`
+	// InstanceWatchedContracts Admin view only (`GET /admin/tenants/{id}/usage`): distinct contracts watched across the whole instance against `MULTI_TENANT_MAX_WATCHED`.
+	InstanceWatchedContracts any           `json:"instance_watched_contracts,omitempty"`
+	Usage                    []TenantUsage `json:"usage"`
+	// WatchedContracts The tenant's own watch list: contracts held against its `max_watched_contracts`. `POST /tenant/watch` returns 429 once `held` reaches `limit`; a null `limit` means the tenant has no cap of its own (the instance-wide cap still applies).
+	WatchedContracts any `json:"watched_contracts"`
+}
+
+// WatchHeadroom How much of a watch-list cap is in use. `limit` is null when there is no cap.
+type WatchHeadroom struct {
+	Held  int64  `json:"held"`
+	Limit *int64 `json:"limit"`
 }
 
 // WatchedContract One contract in the global ingestion watch list.
