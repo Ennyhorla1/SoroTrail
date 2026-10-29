@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "SoroTrail API",
-    "description": "A contract event indexer for the Stellar/Soroban network. SoroTrail polls\na Stellar RPC endpoint, stores contract events durably in Postgres, and\nserves them back through a queryable HTTP API long after the RPC has\nforgotten them.\n\nJSON-producing operations accept the shared `pretty=true` query\nparameter to indent responses for human inspection; it does not change\nthe response data.\n",
+    "description": "A contract event indexer for the Stellar/Soroban network. SoroTrail polls\na Stellar RPC endpoint, stores contract events durably in Postgres, and\nserves them back through a queryable HTTP API long after the RPC has\nforgotten them.\n\nJSON-producing operations accept the shared `pretty=true` query\nparameter to indent responses for human inspection; it does not change\nthe response data.\n\nThe event, contract and address read operations answer conditional\nrequests. A 200 response carries a strong `ETag`, a hash of the exact\nresponse body, and a request that repeats it in `If-None-Match` gets\n`304 Not Modified` with no body when nothing has changed. The listing\noperations stay `Cache-Control: no-cache`, so a client revalidates on\nevery poll and the validator makes that revalidation cheap. `/health`\nand `/stats` change constantly and are never tagged.\n",
     "version": "0.2.0",
     "license": {
       "name": "Apache-2.0",

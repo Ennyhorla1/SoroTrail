@@ -10,6 +10,14 @@ info:
     JSON-producing operations accept the shared `pretty=true` query
     parameter to indent responses for human inspection; it does not change
     the response data.
+
+    The event, contract and address read operations answer conditional
+    requests. A 200 response carries a strong `ETag`, a hash of the exact
+    response body, and a request that repeats it in `If-None-Match` gets
+    `304 Not Modified` with no body when nothing has changed. The listing
+    operations stay `Cache-Control: no-cache`, so a client revalidates on
+    every poll and the validator makes that revalidation cheap. `/health`
+    and `/stats` change constantly and are never tagged.
   version: "0.2.0"
   license:
     name: Apache-2.0
