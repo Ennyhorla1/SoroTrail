@@ -47,6 +47,7 @@ func (m *routeMux) Post(pattern string, handler http.HandlerFunc) {
 	m.register(http.MethodPost, pattern, handler)
 }
 
+// Put registers a handler for HTTP PUT requests at pattern.
 func (m *routeMux) Put(pattern string, handler http.HandlerFunc) {
 	m.register(http.MethodPut, pattern, handler)
 }
