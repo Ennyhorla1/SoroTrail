@@ -51,6 +51,8 @@ func (m *routeMux) Put(pattern string, handler http.HandlerFunc) {
 	m.register(http.MethodPut, pattern, handler)
 }
 
+// Patch registers a handler for HTTP PATCH requests at pattern and
+// rejects a duplicate PATCH registration for the same pattern.
 func (m *routeMux) Patch(pattern string, handler http.HandlerFunc) {
 	m.register(http.MethodPatch, pattern, handler)
 }
