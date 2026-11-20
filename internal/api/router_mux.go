@@ -43,6 +43,7 @@ func (m *routeMux) Get(pattern string, handler http.HandlerFunc) {
 	m.register(http.MethodGet, pattern, handler)
 }
 
+// Post registers a handler for HTTP POST requests at pattern.
 func (m *routeMux) Post(pattern string, handler http.HandlerFunc) {
 	m.register(http.MethodPost, pattern, handler)
 }
